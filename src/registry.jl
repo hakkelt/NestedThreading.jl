@@ -84,10 +84,11 @@ const REGISTRY_LOCK = ReentrantLock()
 The number of worker threads a parallel loop is assumed to be able to occupy. Used as the
 numerator of the automatic budget arithmetic and as the "unrestricted" reference value.
 
-Defined as `Threads.nthreads()`. This is exact for `Threads.@threads` and an approximation
-for Polyester's `@batch`; it is a single function so that assumption lives in one place.
+Defined as `Threads.threadpoolsize()`. This is exact for `Threads.@threads` and an
+approximation for Polyester's `@batch`; it is a single function so that assumption lives
+in one place.
 """
-capacity() = nthreads()
+capacity() = threadpoolsize()
 
 _is_active() = @lock REGISTRY_LOCK !isempty(ACTIVE)
 

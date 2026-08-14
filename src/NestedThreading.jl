@@ -13,7 +13,7 @@ loops. Libraries register themselves through package extensions; see
 """
 module NestedThreading
 
-using Base.Threads: nthreads
+using Base.Threads: threadpoolsize
 using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
