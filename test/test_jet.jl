@@ -21,11 +21,16 @@ end
     using NestedThreading, JET
     const NT = NestedThreading
 
-    @test_opt NT.budget_for(1:8)
-    @test_opt NT.budget_for(CartesianIndices((4, 4)))
-    @test_opt NT.budget_for(Iterators.filter(isodd, 1:10))
-    @test_opt NT.capacity()
-    @test_call NT.budget_for(1:8)
+    # target_modules restricts JET to dispatches originating in our own code: on Julia
+    # 1.10, Threads.threadpoolsize() itself takes an internal sprint-based fallback path
+    # that JET flags as a runtime dispatch, even though nothing in NestedThreading forces
+    # it. That is a stdlib implementation detail of the LTS release, not a regression we
+    # can fix by choosing a different accessor.
+    @test_opt target_modules = (NT,) NT.budget_for(1:8)
+    @test_opt target_modules = (NT,) NT.budget_for(CartesianIndices((4, 4)))
+    @test_opt target_modules = (NT,) NT.budget_for(Iterators.filter(isodd, 1:10))
+    @test_opt target_modules = (NT,) NT.capacity()
+    @test_call target_modules = (NT,) NT.budget_for(1:8)
 end
 
 @testitem "JET: scoped entry points" tags = [:jet] begin
