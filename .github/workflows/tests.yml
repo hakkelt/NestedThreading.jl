@@ -1,0 +1,74 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia-version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['lts', '1']
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+
+    env:
+      JULIA_NUM_THREADS: 4
+
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        with:
+          coverage: true
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+        with:
+          files: lcov.info
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # The extensions must activate when their weakdeps are present and stay inert when they
+  # are not; the default test environment has all of them, so the bare case needs its own job.
+  bare:
+    name: No weakdeps loaded
+    runs-on: ubuntu-latest
+    env:
+      JULIA_NUM_THREADS: 4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Test with LinearAlgebra only
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+            using NestedThreading, LinearAlgebra
+            NT = NestedThreading
+            @assert [p.name for p in NT.COUNTED_POOLS] == [:blas]
+            @assert isempty(NT.GUARDED_POOLS)
+            @assert Base.get_extension(NestedThreading, :NestedThreadingFFTWExt) === nothing
+            @assert Base.get_extension(NestedThreading, :NestedThreadingPolyesterExt) === nothing
+            original = BLAS.get_num_threads()
+            NT.with_restricted_threads() do
+                @assert BLAS.get_num_threads() == 1
+            end
+            @assert BLAS.get_num_threads() == original
+            println("bare-environment checks passed")
+          '

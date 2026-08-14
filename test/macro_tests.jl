@@ -1,0 +1,156 @@
+@testset "@budgeted computes the budget from the trip count" begin
+    reset_probe!()
+    n = NT.capacity()
+
+    seen = zeros(Int, 2n)
+    @budgeted Threads.@threads for j in 1:(2n)
+        seen[j] = PROBE[]
+    end
+    @test all(==(1), seen)                    # loop saturates the machine already
+    @test PROBE[] == 16
+
+    seen2 = zeros(Int, 1)
+    @budgeted Threads.@threads for j in 1:1
+        seen2[j] = PROBE[]
+    end
+    @test seen2[1] == n                       # single item: the body may use everything
+end
+
+@testset "the range expression is evaluated exactly once" begin
+    reset_probe!()
+    evals = Ref(0)
+    mkrange() = (evals[] += 1; 1:4)
+
+    out = zeros(Int, 4)
+    @budgeted_threads for j in mkrange()
+        out[j] = j
+    end
+    @test evals[] == 1
+    @test out == 1:4
+
+    evals[] = 0
+    out2 = zeros(Int, 4)
+    @budgeted_threads threads = false for j in mkrange()
+        out2[j] = j
+    end
+    @test evals[] == 1                        # also once on the sequential branch
+    @test out2 == 1:4
+end
+
+@testset "@budgeted_threads switch" begin
+    reset_probe!()
+    n = NT.capacity()
+
+    budgets = zeros(Int, 2)
+    @budgeted_threads for j in 1:2
+        budgets[j] = PROBE[]
+    end
+    @test all(==(max(1, n ÷ 2)), budgets)
+
+    # threads = false runs sequentially *and* restricts inner libraries to one thread.
+    budgets2 = zeros(Int, 2)
+    tids = zeros(Int, 2)
+    @budgeted_threads threads = false for j in 1:2
+        budgets2[j] = PROBE[]
+        tids[j] = Threads.threadid()
+    end
+    @test all(==(1), budgets2)
+    @test length(unique(tids)) == 1
+    @test PROBE[] == 16
+
+    # The switch is a runtime expression, not a literal.
+    flag = false
+    tids2 = zeros(Int, 4)
+    @budgeted_threads threads = flag for j in 1:4
+        tids2[j] = Threads.threadid()
+    end
+    @test length(unique(tids2)) == 1
+end
+
+@testset "@budgeted accepts macro chains" begin
+    reset_probe!()
+    out = zeros(Int, 4)
+    @budgeted Threads.@threads :static for j in 1:4
+        @inbounds out[j] = PROBE[]
+    end
+    @test all(==(max(1, NT.capacity() ÷ 4)), out)
+
+    # A runtime (non-literal) range works, since the budget is computed at runtime.
+    len = 2
+    out2 = zeros(Int, len)
+    @budgeted Threads.@threads for j in 1:len
+        out2[j] = PROBE[]
+    end
+    @test all(==(max(1, NT.capacity() ÷ 2)), out2)
+end
+
+@testset "aliases expand identically" begin
+    reset_probe!()
+    a = zeros(Int, 2)
+    b = zeros(Int, 2)
+    @budgeted_threads for j in 1:2
+        a[j] = PROBE[]
+    end
+    @ntt for j in 1:2
+        b[j] = PROBE[]
+    end
+    @test a == b
+end
+
+@testset "malformed input is rejected at expansion" begin
+    expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
+
+    @test_throws Exception expand("@budgeted Threads.@threads 1 + 1")
+    @test_throws Exception expand("@budgeted_threads while true; break; end")
+    # Multiple iteration specs have an ambiguous trip count.
+    @test_throws Exception expand("@budgeted_threads for i in 1:2, j in 1:2; nothing; end")
+    # `@budgeted` needs a loop *construct*; a bare `for` would silently be sequential.
+    @test_throws Exception expand("@budgeted for i in 1:2; nothing; end")
+    # An unrecognised keyword argument is an error, not silently ignored.
+    @test_throws Exception expand("@budgeted_threads thread = true for i in 1:2; nothing; end")
+
+    # ...and the well-formed shapes do expand.
+    @test expand("@budgeted Threads.@threads for i in 1:2; nothing; end") isa Expr
+    @test expand("@budgeted_threads threads = f() for i in 1:2; nothing; end") isa Expr
+end
+
+if HAS_POLYESTER
+    @testset "@budgeted_batch does not disable its own loop" begin
+        reset_probe!()
+        n = NT.capacity()
+        tids = zeros(Int, 64 * n)
+        @budgeted_batch for i in eachindex(tids)
+            tids[i] = Threads.threadid()
+        end
+        @test PROBE[] == 16
+        if n > 1
+            @test length(unique(tids)) > 1     # the batch loop really ran in parallel
+        end
+
+        # ...while a *nested* Polyester loop inside a budgeted region is serialized.
+        distinct = zeros(Int, 2)
+        @budgeted_threads for j in 1:2
+            acc = zeros(Int, 64 * n)
+            Polyester.@batch for k in eachindex(acc)
+                acc[k] = Threads.threadid()
+            end
+            distinct[j] = length(unique(acc))
+        end
+        @test all(==(1), distinct)
+    end
+
+    @testset "@budgeted_batch switch and chains" begin
+        reset_probe!()
+        out = zeros(Int, 8)
+        @budgeted_batch threads = false for i in 1:8
+            out[i] = PROBE[]
+        end
+        @test all(==(1), out)
+
+        acc = zeros(Int, 8)
+        @budgeted @inbounds Polyester.@batch for i in 1:8
+            acc[i] = i
+        end
+        @test acc == 1:8
+    end
+end

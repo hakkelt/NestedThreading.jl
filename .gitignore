@@ -1,0 +1,14 @@
+docs/build/
+docs/site/
+docs/Manifest.toml
+Manifest.toml
+Manifest-v*.toml
+.temp/
+
+# Julia coverage files
+*.cov
+*.jl.mem
+lcov.info
+
+# MCP server folders
+.serena
