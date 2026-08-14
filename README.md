@@ -30,9 +30,9 @@ around the loop — once per loop, not once per iteration.
 
 | Function / macro | Purpose |
 | --- | --- |
-| `@budgeted_threads [threads=…] for …` (`@ntt`) | `Threads.@threads` with an automatic inner budget and an on/off switch |
-| `@budgeted_batch [threads=…] for …` (`@ntb`) | the same for Polyester's `@batch` |
-| `@budgeted <loop-macro> for …` (`@nt`) | budget a loop construct you want emitted exactly as written |
+| `@budgeted_threads [threads=…] for …` | `Threads.@threads` with an automatic inner budget and an on/off switch |
+| `@budgeted_batch [threads=…] for …` | the same for Polyester's `@batch` |
+| `@budgeted <loop-macro> for …` | budget a loop construct you want emitted exactly as written |
 | `with_restricted_threads(f)` | limit everything to one thread for the duration of `f()` — for call sites that are not loops |
 | `with_full_threads(f)` | actively request full threading (still clamped by any outer restriction) |
 | `enable_full_threading()` | process-wide escape hatch: set the baseline back to full throttle |
@@ -48,14 +48,19 @@ loaded:
 
 | Library | Kind | Notes |
 | --- | --- | --- |
-| BLAS | counted | always registered; covers MKL, OpenBLAS and any other libblastrampoline backend |
+| BLAS | counted | always registered; `LinearAlgebra.BLAS.get_num_threads`/`set_num_threads` via libblastrampoline |
+| MKL | counted | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]`, on only when nothing is restricted |
 | Polyester | guarded | `disable_polyester_threads` |
 
-MKL deliberately has no extension: `LinearAlgebra.BLAS.set_num_threads` goes through
-libblastrampoline, which forwards to every loaded backend including MKL, so a second pool
-would only double-book the same knob.
+MKL gets its own pool alongside the always-on BLAS one, rather than instead of it:
+`BLAS.set_num_threads` goes through libblastrampoline, which is supposed to forward to
+MKL, but the two do not reliably stay in sync — setting one does not always update what
+the other reports back
+([MKL.jl#174](https://github.com/JuliaLinearAlgebra/MKL.jl/issues/174)). Registering both
+means every budget scope drives MKL's native thread count directly instead of trusting the
+forward.
 
 To add a library this package does not ship, call `register_counted_pool!` from your own
 `__init__`:

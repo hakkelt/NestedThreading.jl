@@ -95,21 +95,6 @@ end
     @test all(==(max(1, NT.capacity() ÷ 2)), out2)
 end
 
-@testitem "short aliases expand identically" tags = [:macros] setup = [Probe] begin
-    using NestedThreading
-    Probe.reset!()
-
-    a = zeros(Int, 2)
-    b = zeros(Int, 2)
-    @budgeted_threads for j in 1:2
-        a[j] = Probe.VALUE[]
-    end
-    @ntt for j in 1:2
-        b[j] = Probe.VALUE[]
-    end
-    @test a == b
-end
-
 @testitem "malformed input is rejected at expansion" tags = [:macros] begin
     using NestedThreading
 

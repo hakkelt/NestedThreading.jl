@@ -10,9 +10,6 @@ NestedThreading
 @budgeted
 @budgeted_threads
 @budgeted_batch
-@nt
-@ntt
-@ntb
 ```
 
 ## Scoped budgets

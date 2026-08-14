@@ -80,12 +80,15 @@ Registration is automatic via package extensions — have the package loaded and
 
 | Library | Kind | Control used |
 | --- | --- | --- |
-| BLAS | counted | `BLAS.get_num_threads`/`set_num_threads` (covers MKL and OpenBLAS alike) |
+| BLAS | counted | `BLAS.get_num_threads`/`set_num_threads` via libblastrampoline |
+| MKL | counted | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]` |
 | Polyester | guarded | `disable_polyester_threads` |
 
-MKL deliberately has no extension: `LinearAlgebra.BLAS.set_num_threads` goes through
-libblastrampoline, which forwards to every loaded backend including MKL.
+MKL gets its own pool alongside the always-on BLAS one: `BLAS.set_num_threads` is supposed
+to forward to MKL through libblastrampoline, but the two do not reliably stay in sync
+([MKL.jl#174](https://github.com/JuliaLinearAlgebra/MKL.jl/issues/174)), so a budget scope
+also drives MKL's native thread count directly.
 
 See [Adding a library](@ref) to register one this package does not ship.

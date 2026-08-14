@@ -72,3 +72,40 @@ jobs:
             @assert BLAS.get_num_threads() == original
             println("bare-environment checks passed")
           '
+
+  # MKL_jll ships no artifact for macOS or any non-x86_64 platform, so this cannot live in
+  # the shared test/Project.toml (instantiating it would break every macOS job). It gets its
+  # own job on the platforms MKL actually supports instead.
+  mkl:
+    name: MKL pool - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      JULIA_NUM_THREADS: 4
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+          arch: x64
+      - uses: julia-actions/cache@v2
+      - name: Test MKL extension
+        run: |
+          julia --project=. -e '
+            using Pkg
+            Pkg.instantiate()
+            Pkg.add("MKL")
+            using NestedThreading, MKL
+            NT = NestedThreading
+            @assert Base.get_extension(NestedThreading, :NestedThreadingMKLExt) !== nothing
+            @assert :mkl in [p.name for p in NT.COUNTED_POOLS]
+            original = MKL.get_num_threads()
+            NT.with_thread_budget(2) do
+                @assert MKL.get_num_threads() == 2
+            end
+            @assert MKL.get_num_threads() == original
+            println("MKL extension checks passed")
+          '

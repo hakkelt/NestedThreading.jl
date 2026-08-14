@@ -134,7 +134,7 @@ Accepts any chain of macros ending in a single `for x in range` loop, so
 evaluated exactly once. A chain containing `@batch` automatically excludes the `:polyester`
 pool, since there the loop being budgeted is itself the Polyester consumer.
 
-Short alias: `@nt`. See also [`@budgeted_threads`](@ref), [`@budgeted_batch`](@ref).
+See also [`@budgeted_threads`](@ref), [`@budgeted_batch`](@ref).
 """
 macro budgeted(ex)
     chain, loop = _peel_macros(ex)
@@ -157,8 +157,6 @@ switch for whether to parallelize at all.
 * `threads = false` runs a plain sequential loop with inner libraries limited to a single
   thread, on the assumption that a caller who switched threading off did so because
   concurrency is happening somewhere else.
-
-Short alias: `@ntt`.
 """
 macro budgeted_threads(args...)
     cond, ex = _parse_switched(args, "@budgeted_threads")
@@ -181,8 +179,6 @@ Polyester `@batch` over `range` with an automatic inner thread budget and the sa
 The calling module must have `Polyester` available (`import Polyester`), since the
 expansion emits `Polyester.@batch`. The `:polyester` pool is excluded from the budget scope
 so that the generated `@batch` loop is not disabled by its own restriction.
-
-Short alias: `@ntb`.
 """
 macro budgeted_batch(args...)
     cond, ex = _parse_switched(args, "@budgeted_batch")
@@ -195,24 +191,3 @@ macro budgeted_batch(args...)
     )
     return esc(_switched_expr(cond, loop, chain, mk, (:polyester,)))
 end
-
-"""
-    @nt
-
-Short alias for [`@budgeted`](@ref).
-"""
-const var"@nt" = var"@budgeted"
-
-"""
-    @ntt
-
-Short alias for [`@budgeted_threads`](@ref).
-"""
-const var"@ntt" = var"@budgeted_threads"
-
-"""
-    @ntb
-
-Short alias for [`@budgeted_batch`](@ref).
-"""
-const var"@ntb" = var"@budgeted_batch"

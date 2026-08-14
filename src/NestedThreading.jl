@@ -17,7 +17,6 @@ using Base.Threads: threadpoolsize
 using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
-    @nt, @ntt, @ntb,
     with_restricted_threads, with_full_threads, enable_full_threading
 
 include("registry.jl")

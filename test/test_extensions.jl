@@ -16,6 +16,11 @@
     @test :nfft in counted
 end
 
+# The MKL extension is tested separately (not here): MKL_jll ships no artifact for macOS or
+# any non-x86_64 platform, so a `using MKL` this test environment would fail to precompile
+# on those CI runners. See the "MKL pool" step in the Tests workflow, which runs only on the
+# platforms MKL_jll actually supports.
+
 @testitem "FFTW pool" tags = [:extensions] begin
     using NestedThreading, FFTW
     const NT = NestedThreading
