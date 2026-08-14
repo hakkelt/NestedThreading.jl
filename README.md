@@ -96,9 +96,11 @@ julia --project=test test/runtests.jl :benchmark   # local-only timing compariso
 ```
 
 Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:benchmark`. The
-benchmark items compare wall-clock times and so are excluded from the default run; on an
-8-thread machine they measure ~1.5x for budgeting a nested-GEMM loop, and ~0.6x for
-budgeting a nested-Polyester loop (see the note on Polyester in the docs).
+benchmark items use BenchmarkTools with paired measurements and are excluded from the
+default run; on an idle 8-thread machine budgeting a nested-GEMM loop takes 0.69x the time
+(a 1.4x speedup) while budgeting a nested-Polyester loop takes 1.55x — see the note on
+Polyester in the docs for why, and for the controls showing the package itself adds no
+measurable overhead.
 
 ## License
 

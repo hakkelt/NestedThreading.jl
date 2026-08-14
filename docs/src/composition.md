@@ -68,20 +68,34 @@ The one exception is a loop that *is* the Polyester consumer. [`@budgeted_batch`
 `exclude = (:polyester,)` so that the `@batch` loop being budgeted is not disabled by its own
 restriction.
 
-!!! note "Polyester is cooperative already; budgeting it costs throughput"
-    Unlike BLAS, Polyester does not really oversubscribe: `disable_polyester_threads` works
-    by *reserving* PolyesterWeave's worker slots, so a nested `@batch` inside an outer
-    parallel loop already finds no free workers and degrades to a serial run on its own.
-    Disabling it explicitly therefore buys predictable thread counts rather than speed, and
-    the package's own benchmarks measure it as **~0.6x** on a nested-`@batch` workload,
-    because Polyester's serial fallback is less optimized than its parallel path. The
-    measured win from budgeting is on BLAS (~1.5x on a nested-GEMM workload), which has no
-    cooperative mechanism of its own. Both numbers come from
-    `julia --project=test test/runtests.jl :benchmark`.
+!!! note "Serializing an inner `@batch` can cost more than the nesting would have"
+    The measured win from budgeting is on BLAS: a nested-GEMM loop runs in **0.69x** the
+    time when budgeted (a 1.4x speedup), which is what this package exists for. On a
+    workload whose *inner* parallelism is Polyester rather than BLAS, budgeting measured
+    **1.55x** the time — a real loss.
 
-    If a call site is Polyester-only with no BLAS/FFTW inside, it is usually better not to
-    wrap it at all — the ambient guard from whatever outer loop encloses it will handle the
-    nesting.
+    The benchmark suite attributes that loss precisely, and it is not overhead from this
+    package. Three controls all come out at 0.99-1.00x against a plain `Threads.@threads`
+    loop: a do-nothing closure wrapper, a budget scope with the `:polyester` pool excluded,
+    and the Polyester guard wrapped around a loop with no `@batch` in it at all. The entire
+    difference is the effect of serializing the inner `@batch` itself. Polyester's serial
+    path is not intrinsically slow either — measured against a hand-written `for` loop in
+    isolation it is within 3% — so the mechanism is something about many threads running
+    serialized `@batch`es concurrently, and this package does not claim to know what.
+
+    The practical guidance stands regardless: if a call site's inner parallelism is
+    Polyester and there is no BLAS/FFTW underneath it, do not wrap it. Polyester already
+    cooperates — `disable_polyester_threads` reserves PolyesterWeave's worker slots, so a
+    nested `@batch` finds none free and serializes on its own — and wrapping only forces
+    that outcome earlier. Reach for a budget scope when there is a *non-cooperative*
+    library (BLAS, FFTW) inside the loop.
+
+    Numbers from `julia --project=test test/runtests.jl :benchmark` on an idle 8-thread
+    machine; rerun them on yours before trusting them. The benchmarks use BenchmarkTools and
+    take *paired* measurements — baseline and variant back-to-back within each round, median
+    of the per-round ratios — because on a dual-socket machine the same loop is bimodal
+    depending on how threads land across sockets, by far more than the effects being
+    measured. Paired, the numbers above reproduce to within 1% run to run.
 
 ## Worked example
 
