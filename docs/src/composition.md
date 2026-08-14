@@ -58,44 +58,60 @@ nothing in Julia can give them any. Taking the minimum over all active scopes th
 
 ## All-or-nothing libraries
 
-Polyester and NFFT have no partial thread count. They are switched **off whenever the applied
-budget is below [`NestedThreading.capacity`](@ref)**, not only when it is 1: a budget of 4
-inside an 8-thread outer loop still means the machine is fully occupied, and a nested
-Polyester loop spawning its own workers on top of that is exactly the oversubscription being
-avoided.
+Polyester and NFFT are switched **off whenever the applied budget is below
+[`NestedThreading.capacity`](@ref)**, not only when it is 1: a budget of 4 inside an
+8-thread outer loop still means the machine is fully occupied, and a nested Polyester loop
+spawning its own workers on top of that is exactly the oversubscription being avoided. NFFT
+has no partial control at all; Polyester does, and it is deliberately not used — see the
+measurements below.
 
 The one exception is a loop that *is* the Polyester consumer. [`@budgeted_batch`](@ref) passes
 `exclude = (:polyester,)` so that the `@batch` loop being budgeted is not disabled by its own
 restriction.
 
-!!! note "Serializing an inner `@batch` can cost more than the nesting would have"
-    The measured win from budgeting is on BLAS: a nested-GEMM loop runs in **0.69x** the
-    time when budgeted (a 1.4x speedup), which is what this package exists for. On a
-    workload whose *inner* parallelism is Polyester rather than BLAS, budgeting measured
-    **1.55x** the time — a real loss.
+!!! warning "Measure in the regime you deploy in"
+    Whether budgeting helps depends almost entirely on how `Threads.nthreads()` compares to
+    the machine's core count, and the difference is not a small factor. Both benchmarks from
+    `test/runtests.jl :benchmark`, run on the same 48-core machine at two thread counts:
 
-    The benchmark suite attributes that loss precisely, and it is not overhead from this
-    package. Three controls all come out at 0.99-1.00x against a plain `Threads.@threads`
-    loop: a do-nothing closure wrapper, a budget scope with the `:polyester` pool excluded,
-    and the Polyester guard wrapped around a loop with no `@batch` in it at all. The entire
-    difference is the effect of serializing the inner `@batch` itself. Polyester's serial
-    path is not intrinsically slow either — measured against a hand-written `for` loop in
-    isolation it is within 3% — so the mechanism is something about many threads running
-    serialized `@batch`es concurrently, and this package does not claim to know what.
+    | benchmark | `nthreads()` | unbudgeted | budgeted | |
+    |---|---|---|---|---|
+    | `nt×GEMM(384)` | 8 | 0.0280 s | 0.0190 s | 1.5x |
+    | `nt×GEMM(384)` | 48 | **85.998 s** | **0.102 s** | **846x** |
+    | `nt×(@batch over 16384)` | 8 | 0.00256 s | 0.00405 s | 0.63x — *loses* |
+    | `nt×(@batch over 16384)` | 48 | **1.103 s** | **0.0135 s** | **82x** |
 
-    The practical guidance stands regardless: if a call site's inner parallelism is
-    Polyester and there is no BLAS/FFTW underneath it, do not wrap it. Polyester already
-    cooperates — `disable_polyester_threads` reserves PolyesterWeave's worker slots, so a
-    nested `@batch` finds none free and serializes on its own — and wrapping only forces
-    that outcome earlier. Reach for a budget scope when there is a *non-cooperative*
-    library (BLAS, FFTW) inside the loop.
+    At `nthreads()` well below the core count there is spare hardware, nesting is free, and
+    restricting only wastes threads — the Polyester row actually comes out *negative* there.
+    At `nthreads()` near the core count the unbudgeted versions collapse: 86 seconds for
+    work that takes a tenth of a second. Benchmarks run in the first regime will tell you
+    this package is useless, and that conclusion does not transfer.
 
-    Numbers from `julia --project=test test/runtests.jl :benchmark` on an idle 8-thread
-    machine; rerun them on yours before trusting them. The benchmarks use BenchmarkTools and
-    take *paired* measurements — baseline and variant back-to-back within each round, median
-    of the per-round ratios — because on a dual-socket machine the same loop is bimodal
-    depending on how threads land across sockets, by far more than the effects being
-    measured. Paired, the numbers above reproduce to within 1% run to run.
+    `BenchHelpers.regime_warning` in the test suite flags the mismatch when it sees one.
+
+!!! note "Why guarded pools are all-or-nothing"
+    PolyesterWeave can reserve *some* worker slots, so an obvious refinement is to reserve
+    only the `capacity() ÷ budget` the outer loop is using and leave the rest for nested
+    loops. That was implemented and measured: 2.7x better at `nthreads() = 8` with 2 outer
+    iterations, and **320x worse** at `nthreads() = 48` with 2 outer iterations. At high
+    thread counts a nested parallel loop is catastrophic however few workers it gets, so
+    leaving any free reopens exactly the pathology being closed. All-or-nothing costs a
+    bounded factor in the under-subscribed regime and avoids an unbounded one in the
+    saturated regime, so that is what the Polyester guard does.
+
+!!! note "Budget scopes themselves are free"
+    The benchmark suite asserts this rather than claiming it. Against a plain
+    `Threads.@threads` loop, three controls all come out at 0.99-1.00x: a do-nothing closure
+    wrapper, a budget scope with the `:polyester` pool excluded, and the Polyester guard
+    wrapped around a loop with no `@batch` in it at all. Whatever budgeting costs or saves,
+    none of it is overhead from this package.
+
+    Numbers from `julia --project=test test/runtests.jl :benchmark`; rerun them on your own
+    machine and thread count. The benchmarks use BenchmarkTools with *paired* measurements —
+    baseline and variant back-to-back within each round, median of the per-round ratios —
+    because on a dual-socket machine the same loop is bimodal depending on how threads land
+    across sockets, by far more than the effects being measured. Paired, the control numbers
+    reproduce to within 1% run to run.
 
 ## Worked example
 

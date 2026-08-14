@@ -21,8 +21,20 @@ end
 A threaded library whose only control is a *scoped* context manager, e.g. Polyester's
 `disable_polyester_threads`.
 
-`guard` must be callable as `guard(f::Function, restricted::Bool)` and must run `f()` with
-that library's threading disabled when `restricted` is `true`, returning `f()`'s value.
+`guard` must be callable as `guard(f::Function, budget::Int)` and must run `f()` with that
+library limited to `budget` threads, returning `f()`'s value. It is only ever called with
+`budget < capacity()`; an unrestricted scope skips guards entirely.
+
+Most such libraries can only be switched fully off, which is the right default: a partial
+limit was implemented for Polyester (which supports one) and measured 320x *worse* in the
+saturated regime, because at high thread counts a nested parallel loop is catastrophic
+however few workers it gets. See the Polyester extension for the numbers. `budget` is passed
+anyway so a library with a genuinely proportional control can use it.
+
+Unlike [`CountedPool`](@ref) this field cannot be a `FunctionWrapper`: the guard receives an
+arbitrary caller closure, whose type is not known until the call site, so one runtime
+dispatch per guarded scope is inherent. It happens once per budget scope, not once per loop
+iteration.
 
 Prefer [`CountedPool`](@ref) whenever the library exposes an imperative setter, even a
 boolean one — a counted pool goes through this package's refcounted snapshot/restore and is

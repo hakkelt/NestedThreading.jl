@@ -16,9 +16,9 @@ purpose — that is exactly the state a downstream package would see.
     const VALUE = Ref(16)
     const APPLIED = Ref{Vector{Int}}(Int[])
 
-    # Guarded pool: records the `restricted` flag it was invoked with, and its nesting depth.
+    # Guarded pool: records the budget it was invoked with, and its nesting depth.
     const DEPTH = Threads.Atomic{Int}(0)
-    const FLAGS = Ref{Vector{Bool}}(Bool[])
+    const BUDGETS = Ref{Vector{Int}}(Int[])
     const LOCK = ReentrantLock()
 
     function register!()
@@ -27,8 +27,8 @@ purpose — that is exactly the state a downstream package would see.
             n -> (VALUE[] = n; @lock LOCK push!(APPLIED[], n); n);
             name = :probe,
         )
-        return NT.register_guarded_pool!(name = :probe_guard) do f, restricted
-            @lock LOCK push!(FLAGS[], restricted)
+        return NT.register_guarded_pool!(name = :probe_guard) do f, budget
+            @lock LOCK push!(BUDGETS[], budget)
             Threads.atomic_add!(DEPTH, 1)
             try
                 f()
@@ -44,13 +44,16 @@ purpose — that is exactly the state a downstream package would see.
     function reset!()
         VALUE[] = 16
         APPLIED[] = Int[]
-        FLAGS[] = Bool[]
+        BUDGETS[] = Int[]
         return nothing
     end
 
     "Index of the probe pool in the parallel `MAXIMA`/`SAVED` arrays."
     probe_index() = findfirst(p -> p.name === :probe, NT.COUNTED_POOLS)
 
-    "The `restricted` flag the guard was last invoked with."
-    last_flag() = FLAGS[][end]
+    "The budget the guard was last invoked with, or `nothing` if it was never invoked."
+    last_budget() = isempty(BUDGETS[]) ? nothing : BUDGETS[][end]
+
+    "Whether the guard ran at all since the last `reset!`."
+    guarded() = !isempty(BUDGETS[])
 end

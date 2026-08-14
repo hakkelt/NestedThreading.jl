@@ -71,11 +71,14 @@ end
 
     NT.with_full_threads() do
         @test Probe.VALUE[] == NT.capacity()
-        @test Probe.last_flag() == false      # guards actively enabled
+        # Nothing is restricted, so guards are skipped entirely rather than invoked with a
+        # "not restricted" flag.
+        @test !Probe.guarded()
     end
+    Probe.reset!()
     NT.with_restricted_threads() do
         @test Probe.VALUE[] == 1
-        @test Probe.last_flag() == true
+        NT.capacity() > 1 && @test Probe.last_budget() == 1
     end
     # Nested inside a restriction, a full-threads request is still clamped.
     NT.with_restricted_threads() do
@@ -86,19 +89,28 @@ end
     @test Probe.VALUE[] == 16
 end
 
-@testitem "guarded pools follow the restriction, not the exact count" tags = [:registry] setup = [Probe] begin
+@testitem "guarded pools receive the applied budget" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading
     Probe.reset!()
 
     if NT.capacity() > 1
+        # The guard is handed the budget itself, so a library with a partial limit (as
+        # Polyester has) can leave the outer loop's unused threads available instead of
+        # switching itself off.
         NT.with_thread_budget(NT.capacity() - 1) do
-            # A partial budget must still disable pools that cannot be partially limited.
-            @test Probe.last_flag() == true
+            @test Probe.last_budget() == NT.capacity() - 1
         end
+        Probe.reset!()
+        NT.with_restricted_threads() do
+            @test Probe.last_budget() == 1
+        end
+        Probe.reset!()
     end
+
+    # An unrestricted scope skips guards altogether.
     NT.with_thread_budget(NT.capacity()) do
-        @test Probe.last_flag() == false
+        @test !Probe.guarded()
     end
     @test Probe.DEPTH[] == 0
 end
@@ -110,7 +122,7 @@ end
 
     NT.with_thread_budget(1; exclude = (:probe_guard,)) do
         @test Probe.DEPTH[] == 0
-        @test isempty(Probe.FLAGS[])
+        @test !Probe.guarded()
         @test Probe.VALUE[] == 1              # counted pools are still applied
     end
 end

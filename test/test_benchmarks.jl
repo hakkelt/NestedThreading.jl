@@ -2,7 +2,12 @@
 # an otherwise idle machine. `test/runtests.jl` excludes the `:benchmark` tag by default;
 # run them explicitly with
 #
-#     julia -t 8 --project=test test/runtests.jl :benchmark
+#     julia -t <threads> --project=test test/runtests.jl :benchmark
+#
+# RUN THEM AT THE THREAD COUNT YOU DEPLOY WITH. Oversubscription only bites once `nthreads()`
+# approaches the core count; with spare hardware, nesting is nearly free and budgeting looks
+# useless. On a 48-core machine these same two benchmarks measured 1.5x and 0.63x at `-t 8`,
+# and 846x and 82x at `-t 48`. `BenchHelpers.regime_warning` flags the mismatch.
 #
 # They need more than one thread to say anything; with `nthreads() == 1` they degrade to a
 # correctness check.
@@ -64,6 +69,27 @@
         return nothing
     end
 
+    """
+        regime_warning()
+
+    Warn when the session is running well below the machine's core count. Oversubscription
+    only bites once `nthreads()` approaches the number of cores; benchmarked with plenty of
+    spare hardware, budgeting looks useless or actively harmful. On a 48-core machine,
+    the two benchmarks here measured 1.5x and 0.63x at `-t 8`, and 846x and 82x at `-t 48`.
+    Results from the wrong regime do not transfer.
+    """
+    function regime_warning()
+        nt, cores = Threads.nthreads(), Sys.CPU_THREADS
+        if nt * 4 <= cores
+            @warn """
+            Benchmarking with $nt thread(s) on a machine reporting $cores CPUs.
+            There is far more hardware than Julia is using, so nesting is nearly free and
+            these numbers will understate (or invert) the benefit of budgeting. Rerun with
+            `-t` close to the core count for numbers that reflect a saturated machine."""
+        end
+        return nothing
+    end
+
     function report(label, t_base, t_var, ratio)
         @printf(
             "  %-28s baseline %8.5f s   variant %8.5f s   variant/baseline %5.2fx\n",
@@ -77,6 +103,7 @@ end
     using NestedThreading, BenchmarkTools, LinearAlgebra, Random
 
     nt = Threads.nthreads()
+    BenchHelpers.regime_warning()
     Random.seed!(0)
 
     # One GEMM per outer worker, each large enough that BLAS would happily use every core.
@@ -131,10 +158,13 @@ end
     end
 end
 
-# Budgeting a loop whose *inner* parallelism is Polyester rather than BLAS measures at ~0.6x
-# on this workload — a real loss. This item exists to attribute that loss, because the
-# interesting question is whether it comes from this package's machinery or from serializing
-# the inner `@batch`.
+# Budgeting a loop whose *inner* parallelism is Polyester rather than BLAS measures at ~1.6x
+# the time in the under-subscribed regime this item usually runs in — a real loss, and the
+# opposite of the picture at `nthreads() ≈ cores`, where the unbudgeted version collapses by
+# two orders of magnitude. Since the headline ratio therefore says more about the machine
+# than about the package, this item asserts nothing about it and instead attributes it: the
+# question worth a regression test is whether the cost comes from this package's machinery or
+# from serializing the inner `@batch`.
 #
 # It is the latter. The three controls below all land on 1.00x against a plain
 # `Threads.@threads` loop, and they are asserted, not just printed:
@@ -153,6 +183,7 @@ end
     import Polyester
 
     nt = Threads.nthreads()
+    BenchHelpers.regime_warning()
     Random.seed!(0)
 
     outer, inner = nt, 1 << 14

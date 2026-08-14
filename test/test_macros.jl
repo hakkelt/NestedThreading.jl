@@ -145,16 +145,25 @@ end
         @test length(unique(tids)) > 1        # the batch loop really ran in parallel
     end
 
-    # ...while a *nested* Polyester loop inside a budgeted region is serialized.
-    distinct = zeros(Int, 2)
-    @budgeted_threads for j in 1:2
-        acc = zeros(Int, 64 * n)
-        Polyester.@batch for k in eachindex(acc)
-            acc[k] = Threads.threadid()
+    # A nested Polyester loop is switched off inside any restricted scope, regardless of how
+    # much headroom the budget nominally leaves. Limiting it proportionally instead was
+    # measured 320x worse in the saturated regime; see the Polyester extension.
+    nested_threads(trip) = begin
+        distinct = zeros(Int, trip)
+        @budgeted_threads for j in 1:trip
+            acc = zeros(Int, 64 * n)
+            Polyester.@batch for k in eachindex(acc)
+                acc[k] = Threads.threadid()
+            end
+            distinct[j] = length(unique(acc))
         end
-        distinct[j] = length(unique(acc))
+        distinct
     end
-    @test all(==(1), distinct)
+
+    # Outer loop saturates the machine (budget 1).
+    @test all(==(1), nested_threads(n))
+    # Outer loop uses 2 of n threads (budget n ÷ 2) — still off, deliberately.
+    n >= 4 && @test all(==(1), nested_threads(2))
 end
 
 @testitem "@budgeted_batch switch and chains" tags = [:macros] setup = [Probe] begin

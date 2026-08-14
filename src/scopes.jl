@@ -2,14 +2,14 @@
 
 # Compose every registered guard around `f`. Recursive rather than a loop so the abstract
 # `guard` call is the only dynamic dispatch and it stays out of the caller's inlining.
-@noinline function _run_guarded(f::F, restricted::Bool, exclude::Tuple, i::Int) where {F}
+@noinline function _run_guarded(f::F, budget::Int, exclude::Tuple, i::Int) where {F}
     i > length(GUARDED_POOLS) && return f()
     pool = GUARDED_POOLS[i]
     if pool.name in exclude
-        return _run_guarded(f, restricted, exclude, i + 1)
+        return _run_guarded(f, budget, exclude, i + 1)
     end
-    return pool.guard(restricted) do
-        _run_guarded(f, restricted, exclude, i + 1)
+    return pool.guard(budget) do
+        _run_guarded(f, budget, exclude, i + 1)
     end
 end
 
@@ -26,11 +26,12 @@ The budget actually applied is `minimum` over *all* budget scopes active in the 
 * concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted on
   the first entry and restored on the last exit.
 
-[`GuardedPool`](@ref)s (Polyester, NFFT) have no partial-count API, so they are disabled
-whenever `n < capacity()` — a budget of 4 inside an 8-thread outer loop must not leave a
-nested Polyester loop free to spawn its own workers. Pass pool names in `exclude` to skip
-guarding a specific pool; [`@budgeted_batch`](@ref) uses `exclude = (:polyester,)` because
-there the outer loop *is* the Polyester consumer.
+[`GuardedPool`](@ref)s are invoked only when the applied budget is below [`capacity`](@ref),
+and receive that budget. Polyester's guard switches it off outright rather than limiting it
+proportionally — a partial limit was tried and measured far worse in the saturated regime;
+see [`GuardedPool`](@ref). Pass pool names in `exclude` to skip guarding a specific pool;
+[`@budgeted_batch`](@ref) uses `exclude = (:polyester,)` because there the outer loop *is*
+the Polyester consumer.
 
 !!! note "Process-global state"
     BLAS and FFTW thread counts are process-global with no per-task scoping. Taking the
@@ -45,7 +46,7 @@ function with_thread_budget(f::F, n::Integer; exclude::Tuple = ()) where {F}
     budget = max(1, Int(n))
     applied = _enter!(budget)
     return try
-        _run_guarded(f, applied < capacity(), exclude, 1)
+        applied < capacity() ? _run_guarded(f, applied, exclude, 1) : f()
     finally
         _exit!(budget)
     end

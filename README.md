@@ -83,9 +83,10 @@ tasks are restricted too.** BLAS and FFTW thread counts are process-global with 
 scoping, so there is no version of this that is both safe and per-task; this package chooses
 the direction that never oversubscribes.
 
-Libraries with no partial-count API (Polyester, NFFT) are switched fully off whenever the
-budget is below `capacity()`, not just when it is 1 — a budget of 4 inside an 8-thread outer
-loop must not leave a nested Polyester loop free to spawn its own workers.
+Polyester and NFFT are switched fully off whenever the budget is below `capacity()`, not just
+when it is 1 — a budget of 4 inside an 8-thread outer loop must not leave a nested Polyester
+loop free to spawn its own workers. Polyester can in fact be limited partially; doing so was
+measured 320x worse in the saturated regime and is deliberately not done.
 
 ## Tests
 
@@ -97,10 +98,14 @@ julia --project=test test/runtests.jl :benchmark   # local-only timing compariso
 
 Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:benchmark`. The
 benchmark items use BenchmarkTools with paired measurements and are excluded from the
-default run; on an idle 8-thread machine budgeting a nested-GEMM loop takes 0.69x the time
-(a 1.4x speedup) while budgeting a nested-Polyester loop takes 1.55x — see the note on
-Polyester in the docs for why, and for the controls showing the package itself adds no
-measurable overhead.
+default run.
+
+**Run them at the thread count you actually deploy with.** Whether budgeting helps depends
+on how `nthreads()` compares to the core count, and not by a small factor: on a 48-core
+machine, the same nested-GEMM benchmark gains 1.5x at `-t 8` and **846x** at `-t 48`, and the
+nested-Polyester one *loses* 1.6x at `-t 8` while gaining **82x** at `-t 48`.
+The docs have the full table. The suite also asserts that budget scopes themselves are free
+(0.99-1.00x against a plain `Threads.@threads` loop on three separate controls).
 
 ## License
 

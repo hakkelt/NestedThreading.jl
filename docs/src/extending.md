@@ -36,10 +36,15 @@ Only for libraries whose sole control is a scoped context manager with no impera
 Polyester's `disable_polyester_threads` is the motivating case:
 
 ```julia
-_guard(f, restricted::Bool) = restricted ? MyLib.without_threads(f) : f()
+# `guard` is only ever called when a restriction is in force; `budget` is the applied
+# thread budget, provided in case the library has a proportional control.
+_guard(f, budget::Int) = MyLib.without_threads(f)
 
 NestedThreading.register_guarded_pool!(_guard; name = :mylib)
 ```
+
+Switching the library fully off is usually right even when a partial limit is available; see
+[Composition rules](@ref) for the measurements behind that.
 
 !!! warning "Do not write a guard that saves and restores a global"
     A guard of the form `prev = X[]; X[] = new; try f() finally X[] = prev end` reintroduces
