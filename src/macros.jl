@@ -53,10 +53,10 @@ function _auto_exclude(chain)
     return ()
 end
 
-function _budgeted_expr(loop::Expr, chain, exclude::Tuple)
+function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity)
     var, range, body = _split_for(loop)
     rangevar, budgetvar = gensym("range"), gensym("budget")
-    parallel = _rewrap(chain, Expr(:for, Expr(:(=), var, rangevar), body))
+    parallel = _rewrap(chain, mkparallel(Expr(:for, Expr(:(=), var, rangevar), body)))
     return quote
         let $rangevar = $range,
                 $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
@@ -74,6 +74,11 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
     rangevar, budgetvar = gensym("range"), gensym("budget")
     sequential = _rewrap(chain, Expr(:for, Expr(:(=), var, rangevar), body))
     parallel = _rewrap(chain, mkparallel(Expr(:for, Expr(:(=), var, rangevar), body)))
+    # `threads` omitted (or a literal `true`) is the common case; emit only the parallel
+    # branch so the body is not lowered twice.
+    if cond === true
+        return _budgeted_expr(Expr(:for, Expr(:(=), var, range), body), chain, exclude, mkparallel)
+    end
     return quote
         let $rangevar = $range
             if $cond

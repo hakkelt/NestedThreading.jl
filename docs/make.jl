@@ -7,7 +7,9 @@ DocMeta.setdocmeta!(
 
 makedocs(;
     modules = [NestedThreading],
-    format = Documenter.HTML(),
+    format = Documenter.HTML(;
+        edit_link = "master", repolink = "https://github.com/hakkelt/NestedThreading.jl"
+    ),
     sitename = "NestedThreading.jl",
     repo = "https://github.com/hakkelt/NestedThreading.jl/blob/{commit}{path}#{line}",
     authors = "Tamás Hakkel",

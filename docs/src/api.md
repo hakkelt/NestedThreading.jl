@@ -1,5 +1,9 @@
 # API reference
 
+```@docs
+NestedThreading
+```
+
 ## Loop macros
 
 ```@docs
