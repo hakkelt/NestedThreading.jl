@@ -39,8 +39,23 @@ struct GuardedPool
 end
 
 # Separate concretely-typed vectors (rather than one Vector{Union{...}}) so that iteration
-# stays inference-friendly; the abstract `Function` fields are the only dynamic dispatch
-# left, and it is contained in @noinline helpers below.
+# stays inference-friendly.
+#
+# ON THE `::Function` FIELDS AND THEIR RUNTIME DISPATCH
+#
+# A registry that downstream packages extend at load time cannot be concretely typed: the
+# set of pools is only known at runtime, so calling `pool.get`/`pool.set`/`pool.guard` is a
+# dynamic dispatch. This is inherent, not an oversight, and the alternatives are worse:
+#
+#   * `FunctionWrapper` fields do not remove the dispatch, they relocate it into
+#     FunctionWrappers' own `reinit_wrapper` path — which lazily mutates the stored function
+#     pointer, and so is not safe for a registry that is read from many threads.
+#   * A small `Union` of concrete function types would close the registry to extension,
+#     which is the whole point of the package.
+#
+# What is done instead: the dispatch is confined to the `@noinline` helpers below, so it
+# never leaks into callers' inlined code, and it costs one dispatch per *budget scope* —
+# once per `mul!` — never once per loop iteration.
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
 

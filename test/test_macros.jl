@@ -1,23 +1,28 @@
-@testset "@budgeted computes the budget from the trip count" begin
-    reset_probe!()
+@testitem "@budgeted computes the budget from the trip count" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
     n = NT.capacity()
 
     seen = zeros(Int, 2n)
     @budgeted Threads.@threads for j in 1:(2n)
-        seen[j] = PROBE[]
+        seen[j] = Probe.VALUE[]
     end
-    @test all(==(1), seen)                    # loop saturates the machine already
-    @test PROBE[] == 16
+    @test all(==(1), seen)                    # the loop already saturates the machine
+    @test Probe.VALUE[] == 16
 
     seen2 = zeros(Int, 1)
     @budgeted Threads.@threads for j in 1:1
-        seen2[j] = PROBE[]
+        seen2[j] = Probe.VALUE[]
     end
     @test seen2[1] == n                       # single item: the body may use everything
 end
 
-@testset "the range expression is evaluated exactly once" begin
-    reset_probe!()
+@testitem "the range expression is evaluated exactly once" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    Probe.reset!()
+
     evals = Ref(0)
     mkrange() = (evals[] += 1; 1:4)
 
@@ -37,13 +42,16 @@ end
     @test out2 == 1:4
 end
 
-@testset "@budgeted_threads switch" begin
-    reset_probe!()
+@testitem "@budgeted_threads switch" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
     n = NT.capacity()
 
     budgets = zeros(Int, 2)
     @budgeted_threads for j in 1:2
-        budgets[j] = PROBE[]
+        budgets[j] = Probe.VALUE[]
     end
     @test all(==(max(1, n ÷ 2)), budgets)
 
@@ -51,12 +59,12 @@ end
     budgets2 = zeros(Int, 2)
     tids = zeros(Int, 2)
     @budgeted_threads threads = false for j in 1:2
-        budgets2[j] = PROBE[]
+        budgets2[j] = Probe.VALUE[]
         tids[j] = Threads.threadid()
     end
     @test all(==(1), budgets2)
     @test length(unique(tids)) == 1
-    @test PROBE[] == 16
+    @test Probe.VALUE[] == 16
 
     # The switch is a runtime expression, not a literal.
     flag = false
@@ -67,11 +75,14 @@ end
     @test length(unique(tids2)) == 1
 end
 
-@testset "@budgeted accepts macro chains" begin
-    reset_probe!()
+@testitem "@budgeted accepts macro chains" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
     out = zeros(Int, 4)
     @budgeted Threads.@threads :static for j in 1:4
-        @inbounds out[j] = PROBE[]
+        @inbounds out[j] = Probe.VALUE[]
     end
     @test all(==(max(1, NT.capacity() ÷ 4)), out)
 
@@ -79,25 +90,29 @@ end
     len = 2
     out2 = zeros(Int, len)
     @budgeted Threads.@threads for j in 1:len
-        out2[j] = PROBE[]
+        out2[j] = Probe.VALUE[]
     end
     @test all(==(max(1, NT.capacity() ÷ 2)), out2)
 end
 
-@testset "aliases expand identically" begin
-    reset_probe!()
+@testitem "short aliases expand identically" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    Probe.reset!()
+
     a = zeros(Int, 2)
     b = zeros(Int, 2)
     @budgeted_threads for j in 1:2
-        a[j] = PROBE[]
+        a[j] = Probe.VALUE[]
     end
     @ntt for j in 1:2
-        b[j] = PROBE[]
+        b[j] = Probe.VALUE[]
     end
     @test a == b
 end
 
-@testset "malformed input is rejected at expansion" begin
+@testitem "malformed input is rejected at expansion" tags = [:macros] begin
+    using NestedThreading
+
     expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
 
     @test_throws Exception expand("@budgeted Threads.@threads 1 + 1")
@@ -114,43 +129,48 @@ end
     @test expand("@budgeted_threads threads = f() for i in 1:2; nothing; end") isa Expr
 end
 
-if HAS_POLYESTER
-    @testset "@budgeted_batch does not disable its own loop" begin
-        reset_probe!()
-        n = NT.capacity()
-        tids = zeros(Int, 64 * n)
-        @budgeted_batch for i in eachindex(tids)
-            tids[i] = Threads.threadid()
-        end
-        @test PROBE[] == 16
-        if n > 1
-            @test length(unique(tids)) > 1     # the batch loop really ran in parallel
-        end
+@testitem "@budgeted_batch does not disable its own loop" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    import Polyester
+    const NT = NestedThreading
+    Probe.reset!()
 
-        # ...while a *nested* Polyester loop inside a budgeted region is serialized.
-        distinct = zeros(Int, 2)
-        @budgeted_threads for j in 1:2
-            acc = zeros(Int, 64 * n)
-            Polyester.@batch for k in eachindex(acc)
-                acc[k] = Threads.threadid()
-            end
-            distinct[j] = length(unique(acc))
-        end
-        @test all(==(1), distinct)
+    n = NT.capacity()
+    tids = zeros(Int, 64 * n)
+    @budgeted_batch for i in eachindex(tids)
+        tids[i] = Threads.threadid()
+    end
+    @test Probe.VALUE[] == 16
+    if n > 1
+        @test length(unique(tids)) > 1        # the batch loop really ran in parallel
     end
 
-    @testset "@budgeted_batch switch and chains" begin
-        reset_probe!()
-        out = zeros(Int, 8)
-        @budgeted_batch threads = false for i in 1:8
-            out[i] = PROBE[]
+    # ...while a *nested* Polyester loop inside a budgeted region is serialized.
+    distinct = zeros(Int, 2)
+    @budgeted_threads for j in 1:2
+        acc = zeros(Int, 64 * n)
+        Polyester.@batch for k in eachindex(acc)
+            acc[k] = Threads.threadid()
         end
-        @test all(==(1), out)
-
-        acc = zeros(Int, 8)
-        @budgeted @inbounds Polyester.@batch for i in 1:8
-            acc[i] = i
-        end
-        @test acc == 1:8
+        distinct[j] = length(unique(acc))
     end
+    @test all(==(1), distinct)
+end
+
+@testitem "@budgeted_batch switch and chains" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    import Polyester
+    Probe.reset!()
+
+    out = zeros(Int, 8)
+    @budgeted_batch threads = false for i in 1:8
+        out[i] = Probe.VALUE[]
+    end
+    @test all(==(1), out)
+
+    acc = zeros(Int, 8)
+    @budgeted @inbounds Polyester.@batch for i in 1:8
+        acc[i] = i
+    end
+    @test acc == 1:8
 end

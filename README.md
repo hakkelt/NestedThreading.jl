@@ -87,6 +87,19 @@ Libraries with no partial-count API (Polyester, NFFT) are switched fully off whe
 budget is below `capacity()`, not just when it is 1 — a budget of 4 inside an 8-thread outer
 loop must not leave a nested Polyester loop free to spawn its own workers.
 
+## Tests
+
+```sh
+julia --project=test test/runtests.jl              # everything except :benchmark
+julia --project=test test/runtests.jl :macros      # one tag
+julia --project=test test/runtests.jl :benchmark   # local-only timing comparisons
+```
+
+Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:benchmark`. The
+benchmark items compare wall-clock times and so are excluded from the default run; on an
+8-thread machine they measure ~1.5x for budgeting a nested-GEMM loop, and ~0.6x for
+budgeting a nested-Polyester loop (see the note on Polyester in the docs).
+
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md).

@@ -68,6 +68,21 @@ The one exception is a loop that *is* the Polyester consumer. [`@budgeted_batch`
 `exclude = (:polyester,)` so that the `@batch` loop being budgeted is not disabled by its own
 restriction.
 
+!!! note "Polyester is cooperative already; budgeting it costs throughput"
+    Unlike BLAS, Polyester does not really oversubscribe: `disable_polyester_threads` works
+    by *reserving* PolyesterWeave's worker slots, so a nested `@batch` inside an outer
+    parallel loop already finds no free workers and degrades to a serial run on its own.
+    Disabling it explicitly therefore buys predictable thread counts rather than speed, and
+    the package's own benchmarks measure it as **~0.6x** on a nested-`@batch` workload,
+    because Polyester's serial fallback is less optimized than its parallel path. The
+    measured win from budgeting is on BLAS (~1.5x on a nested-GEMM workload), which has no
+    cooperative mechanism of its own. Both numbers come from
+    `julia --project=test test/runtests.jl :benchmark`.
+
+    If a call site is Polyester-only with no BLAS/FFTW inside, it is usually better not to
+    wrap it at all — the ambient guard from whatever outer loop encloses it will handle the
+    nesting.
+
 ## Worked example
 
 With `Threads.nthreads() == 8`:
