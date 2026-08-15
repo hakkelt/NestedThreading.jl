@@ -114,6 +114,54 @@ end
     @test expand("@budgeted_threads threads = f() for i in 1:2; nothing; end") isa Expr
 end
 
+@testitem "a chain that already parallelizes is rejected" tags = [:macros] begin
+    using NestedThreading
+    import Polyester
+
+    # A user macro whose name merely *contains* a listed one, to pin down that the check
+    # matches the macro's own name rather than a substring.
+    macro my_batch(ex)
+        esc(ex)
+    end
+
+    expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
+    # The error is thrown during expansion, so it arrives wrapped in a LoadError.
+    message(str) = sprint(showerror, try
+            expand(str)
+            nothing
+        catch err
+            err
+        end)
+
+    # `@budgeted_threads` emits `Threads.@threads` itself, so a chain containing another
+    # parallel loop macro would parallelize the same loop twice — `@budgeted_threads
+    # Polyester.@batch for ...` expands to `Polyester.@batch Threads.@threads for ...`.
+    for str in (
+            "@budgeted_threads Threads.@threads for i in 1:2; nothing; end",
+            "@budgeted_threads Polyester.@batch for i in 1:2; nothing; end",
+            "@budgeted_threads @inbounds Threads.@threads for i in 1:2; nothing; end",
+            "@budgeted_batch Polyester.@batch for i in 1:2; nothing; end",
+            "@budgeted_batch Threads.@threads for i in 1:2; nothing; end",
+            "@budgeted_threads threads = false @distributed for i in 1:2; nothing; end",
+        )
+        @test_throws Exception expand(str)
+        # The message points at the fix rather than just failing.
+        @test occursin("@budgeted", message(str))
+    end
+
+    # Body-level macros distribute no iterations and are still accepted. (`@simd` is not
+    # among them in practice: the chain is rebuilt *around* the emitted parallel loop, and
+    # `@simd` insists on being handed a bare `for`. Use `@budgeted` for that combination.)
+    @test expand("@budgeted_threads @inbounds for i in 1:2; nothing; end") isa Expr
+    @test expand("@budgeted_batch @inbounds for i in 1:2; nothing; end") isa Expr
+    # A user macro whose name merely contains a listed one is not caught: the match is on
+    # the macro's own name with any module path stripped, not a substring search.
+    @test expand("@budgeted_threads @my_batch for i in 1:2; nothing; end") isa Expr
+
+    # `@budgeted` is the escape hatch, and it still accepts exactly these constructs.
+    @test expand("@budgeted Polyester.@batch minbatch = 64 for i in 1:2; nothing; end") isa Expr
+end
+
 @testitem "@budgeted_batch does not disable its own loop" tags = [:macros] setup = [Probe] begin
     using NestedThreading
     import Polyester

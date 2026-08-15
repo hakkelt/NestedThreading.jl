@@ -43,14 +43,50 @@ function _split_for(loop::Expr)
     return spec.args[1], spec.args[2], loop.args[2]
 end
 
-_macro_name(ex) = ex isa Expr && ex.head === :macrocall ? string(ex.args[1]) : ""
+# The macro's own name with any module path stripped: `Threads.@threads` and
+# `Base.Threads.@threads` both give `Symbol("@threads")`. Compared by symbol rather than by
+# `occursin` on the stringified head, which is both fragile (a qualified call stringifies as
+# `Polyester.var"@batch"`) and too loose (a user macro `@my_batch` would match `@batch`).
+function _macro_name(ex)
+    (ex isa Expr && ex.head === :macrocall) || return Symbol("")
+    name = ex.args[1]
+    while name isa Expr && name.head === :.
+        name = name.args[2]
+    end
+    name isa QuoteNode && (name = name.value)
+    return name isa Symbol ? name : Symbol("")
+end
 
 # Polyester's `@batch` must not be disabled by the very scope that budgets it.
 function _auto_exclude(chain)
     for (call, _) in chain
-        occursin("@batch", _macro_name(call)) && return (:polyester,)
+        _macro_name(call) === Symbol("@batch") && return (:polyester,)
     end
     return ()
+end
+
+# Loop macros that pick a parallel execution strategy themselves. `@budgeted_threads` and
+# `@budgeted_batch` emit one of these, so finding another in the chain means the loop would
+# be parallelized twice — `@budgeted_threads Polyester.@batch for ...` expands to
+# `Polyester.@batch Threads.@threads for ...`, which is not what anyone means. `@budgeted`
+# exists precisely for a construct the caller has already chosen, so the fix is to use it.
+#
+# Deliberately not listed: `@turbo`, `@simd`, `@inbounds` and friends, which change how a
+# single worker runs the body rather than how the iterations are distributed, and compose
+# fine with an emitted parallel loop.
+const _PARALLEL_MACROS =
+    map(Symbol, ("@threads", "@batch", "@distributed", "@floop", "@tturbo"))
+
+function _reject_parallel_chain(chain, macroname, emitted)
+    for (call, _) in chain
+        name = _macro_name(call)
+        name in _PARALLEL_MACROS && error(
+            "NestedThreading: `$macroname` emits `$emitted` itself, but the loop is " *
+                "already wrapped in `$name`. Use `@budgeted $name for ...` to budget a " *
+                "parallel loop you have written yourself, or drop the inner macro."
+        )
+    end
+    return nothing
 end
 
 function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity)
@@ -157,10 +193,18 @@ switch for whether to parallelize at all.
 * `threads = false` runs a plain sequential loop with inner libraries limited to a single
   thread, on the assumption that a caller who switched threading off did so because
   concurrency is happening somewhere else.
+
+Body-level macros such as `@inbounds` may wrap the loop; they are rebuilt around the
+emitted `Threads.@threads`. A macro that parallelizes the loop itself (`Threads.@threads`,
+`Polyester.@batch`, `@distributed`, …) is rejected at expansion, since this macro emits one
+already — use [`@budgeted`](@ref) to budget a parallel loop you have written yourself.
+`@budgeted` is also the way to combine this with a macro that insists on being handed a
+bare `for` loop, such as `@simd`.
 """
 macro budgeted_threads(args...)
     cond, ex = _parse_switched(args, "@budgeted_threads")
     chain, loop = _peel_macros(ex)
+    _reject_parallel_chain(chain, "@budgeted_threads", "Threads.@threads")
     mk = body -> Expr(
         :macrocall,
         Expr(:., Expr(:., :Base, QuoteNode(:Threads)), QuoteNode(Symbol("@threads"))),
@@ -179,10 +223,15 @@ Polyester `@batch` over `range` with an automatic inner thread budget and the sa
 The calling module must have `Polyester` available (`import Polyester`), since the
 expansion emits `Polyester.@batch`. The `:polyester` pool is excluded from the budget scope
 so that the generated `@batch` loop is not disabled by its own restriction.
+
+As with [`@budgeted_threads`](@ref), a chain that already parallelizes the loop is rejected
+at expansion; pass `@batch`'s own options to [`@budgeted`](@ref) instead
+(`@budgeted Polyester.@batch minbatch=64 for ...`).
 """
 macro budgeted_batch(args...)
     cond, ex = _parse_switched(args, "@budgeted_batch")
     chain, loop = _peel_macros(ex)
+    _reject_parallel_chain(chain, "@budgeted_batch", "Polyester.@batch")
     mk = body -> Expr(
         :macrocall,
         Expr(:., :Polyester, QuoteNode(Symbol("@batch"))),
