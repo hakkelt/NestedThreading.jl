@@ -42,19 +42,28 @@ end
     # concurrency instead of having every scope save and restore the global itself.
     original = NFFT._use_threads[]
     try
+        # The setting must survive a budget scope whatever it started as, and whatever the
+        # thread count — including `capacity() == 1`, where "restricted" and "full" are the
+        # same budget and a naive `n >= capacity()` mapping flips `false` to `true` and
+        # never restores it. See the extension for why the threshold is clamped to 2.
         for start in (true, false)
             NFFT._use_threads[] = start
             NT.with_restricted_threads() do
                 @test NFFT._use_threads[] == false
             end
             @test NFFT._use_threads[] == start
+            NT.with_full_threads() do
+                nothing
+            end
+            @test NFFT._use_threads[] == start
         end
 
         # An explicit full-threads request turns NFFT on even if it was off, which is what
-        # an operator with `threaded = true` needs.
+        # an operator with `threaded = true` needs. Not in a single-threaded session, where
+        # NFFT's threaded path has no workers to use.
         NFFT._use_threads[] = false
         NT.with_full_threads() do
-            @test NFFT._use_threads[] == true
+            @test NFFT._use_threads[] == (NT.capacity() > 1)
         end
         @test NFFT._use_threads[] == false
 

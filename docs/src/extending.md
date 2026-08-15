@@ -21,14 +21,25 @@ concurrency for free.
 guard — this is how the NFFT extension is written:
 
 ```julia
-_get_threads() = MyLib.threading_enabled[] ? NestedThreading.capacity() : 1
-_set_threads(n) = (MyLib.threading_enabled[] = n >= NestedThreading.capacity())
+_full() = max(2, NestedThreading.capacity())
+_get_threads() = MyLib.threading_enabled[] ? _full() : 1
+_set_threads(n) = (MyLib.threading_enabled[] = n >= _full())
 
 NestedThreading.register_counted_pool!(_get_threads, _set_threads; name = :mylib)
 ```
 
-`n >= capacity()` rather than `n > 1` because a library with no partial control should be off
-whenever anything is restricted; see [Composition rules](@ref).
+The threshold is `capacity()` rather than `1` because a library with no partial control
+should be off whenever anything is restricted; see [Composition rules](@ref).
+
+!!! warning "Clamp the threshold to 2"
+    The getter and setter must round-trip: `set(get())` has to be a no-op, because that is
+    exactly what the last scope exit does. With a bare `capacity()` threshold that breaks in
+    a single-threaded session, where `capacity() == 1` makes "restricted to 1" and "full
+    throttle" the same number — the getter maps `false` to 1 and the setter maps 1 back to
+    `true`, so every budget scope silently enables a library the user had switched off and
+    never restores it. `max(2, capacity())` is identical everywhere else and costs only
+    that `with_full_threads` will not enable the library on a machine with one thread,
+    where its threaded path has no workers anyway.
 
 ## Guarded pools
 

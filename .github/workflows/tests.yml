@@ -32,14 +32,42 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         with:
-          coverage: true
+          # Instrumentation costs time and only one leg is uploaded, so collect it there.
+          coverage: ${{ matrix.os == 'ubuntu-latest' && matrix.julia-version == '1' }}
       - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+        with:
+          # Both the package and its extensions; the default already covers these, but the
+          # extensions carry real logic (the NFFT boolean mapping, the Polyester guard) and
+          # dropping them from coverage silently would be easy to miss.
+          directories: src,ext
       - uses: codecov/codecov-action@v5
         if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
         with:
           files: lcov.info
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
+  # `capacity() == 1` collapses "restricted" and "full throttle" onto the same budget, which
+  # is a genuinely different code path for every all-or-nothing pool — it is where the NFFT
+  # boolean mapping was found not to round-trip. The main matrix runs at 4 threads, so this
+  # regime needs a job of its own.
+  single-thread:
+    name: Single-threaded session
+    runs-on: ubuntu-latest
+    env:
+      JULIA_NUM_THREADS: 1
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
 
   # The extensions must activate when their weakdeps are present and stay inert when they
   # are not; the default test environment has all of them, so the bare case needs its own job.
