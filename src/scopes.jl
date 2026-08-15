@@ -33,6 +33,20 @@ see [`GuardedPool`](@ref). Pass pool names in `exclude` to skip guarding a speci
 [`@budgeted_batch`](@ref) uses `exclude = (:polyester,)` because there the outer loop *is*
 the Polyester consumer.
 
+!!! note "Guards are decided once, at entry"
+    Counted pools follow the applied minimum for as long as the scope is open — another
+    task narrowing the budget lowers them immediately. Guards cannot work that way: a
+    guard is a lexical wrapper around `f()`, so whether it runs is decided from the budget
+    *at entry* and cannot be revised afterwards.
+
+    So a scope that enters while nothing is restricted runs its body unguarded even if a
+    concurrent task restricts the process meanwhile: its BLAS and FFTW counts drop, but a
+    nested Polyester loop inside it can still spawn workers. The other direction is safe —
+    a scope that entered restricted stays guarded for its whole body even after the other
+    scope exits. Only the guarded libraries are affected, and only for scopes that opened
+    unrestricted; if it matters, open the restricting scope before spawning the tasks
+    rather than from inside them.
+
 !!! note "A budget of `capacity()` raises, it does not merely permit"
     The budget is applied to every counted pool unconditionally, so a scope whose budget
     works out to [`capacity`](@ref) — `with_full_threads`, or a loop with a single item —
@@ -55,6 +69,9 @@ function with_thread_budget(f::F, n::Integer; exclude::Tuple = ()) where {F}
     budget = max(1, Int(n))
     applied = _enter!(budget)
     return try
+        # `applied` is the minimum at entry. Counted pools go on tracking the live minimum
+        # through `_enter!`/`_exit!`, but guards are lexical wrappers and so are decided
+        # here, once, and never revised — see the docstring for what that costs.
         applied < capacity() ? _run_guarded(f, applied, exclude, 1) : f()
     finally
         _exit!(budget)

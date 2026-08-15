@@ -113,6 +113,37 @@ restriction.
     across sockets, by far more than the effects being measured. Paired, the control numbers
     reproduce to within 1% run to run.
 
+## Guarded pools are decided at entry, counted pools are not
+
+The two kinds of pool track the process-wide minimum differently, and the difference is
+observable.
+
+A counted pool is a global that the registry writes on every entry and exit, so it always
+reflects the *current* minimum: if another task opens a narrower scope while yours is
+running, your BLAS and FFTW counts drop with it. A [`NestedThreading.GuardedPool`](@ref)
+has no global to write — the guard is a lexical wrapper around `f()`, and `f()` is already
+running. Whether a guard was entered is therefore decided once, from the budget at entry,
+and cannot be revised.
+
+| | task A | task B | BLAS (counted) | Polyester (guarded) |
+| --- | --- | --- | --- | --- |
+| 1 | opens a full-capacity scope | | `capacity()` | enabled |
+| 2 | | opens a scope at 1 | 1 | disabled **for B only** |
+| 3 | body runs | body runs | 1 | A's nested `@batch` still spawns workers |
+
+So a scope that opens while nothing is restricted runs its body unguarded even if the
+process is restricted underneath it a moment later. Note what is *not* affected: the
+counted pools are correct throughout (row 3, BLAS is at 1 for both tasks), and the opposite
+direction is safe — a scope that entered restricted stays guarded for its whole body even
+after the other scope exits, which is conservative rather than oversubscribing.
+
+The window only exists for a scope that opened unrestricted, and only for guarded libraries
+— today that is Polyester alone. It is not closable: `disable_polyester_threads` reserves
+worker slots around a call, and there is no way for another task to enter that reservation
+around a call already in flight. If it matters for your workload, open the restricting
+scope *before* spawning the tasks rather than from inside them, which is what the loop
+macros do — they wrap the loop, not the loop body.
+
 ## A full budget raises, it does not merely permit
 
 The applied budget is written to every counted pool unconditionally, so a scope that works
