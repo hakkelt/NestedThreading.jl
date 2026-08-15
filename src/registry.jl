@@ -90,8 +90,6 @@ in one place.
 """
 capacity() = threadpoolsize()
 
-_is_active() = @lock REGISTRY_LOCK !isempty(ACTIVE)
-
 # --- registration ---------------------------------------------------------------------
 
 """
@@ -105,7 +103,13 @@ wants to add a library this package does not ship an extension for:
 NestedThreading.register_counted_pool!(MyLib.get_threads, MyLib.set_threads; name = :mylib)
 ```
 
+Registering a `name` that is already present is a no-op, so duplicate extensions across
+packages are harmless.
+
 Registration is expected to happen at load time (`__init__`), before any concurrent use.
+Registering while a budget scope is already open is nevertheless handled: the newcomer's
+current count becomes its restore value and the restriction in force is applied to it
+immediately, so it is restored along with everything else when the last scope exits.
 """
 function register_counted_pool!(get::Function, set::Function; name::Symbol)
     @lock REGISTRY_LOCK begin
@@ -126,7 +130,12 @@ end
     register_guarded_pool!(guard; name::Symbol)
 
 Register a library that only has a scoped on/off switch. `guard` is called as
-`guard(f, restricted::Bool)`; see [`GuardedPool`](@ref) for the contract.
+`guard(f, budget::Int)` and must run `f()` with that library limited to `budget` threads,
+returning `f()`'s value; see [`GuardedPool`](@ref) for the full contract.
+
+Registering a `name` that is already present is a no-op, so duplicate extensions across
+packages are harmless. Registration is expected to happen at load time (`__init__`); a
+guard registered while a budget scope is already open is not retroactively applied to it.
 """
 function register_guarded_pool!(guard::Function; name::Symbol)
     @lock REGISTRY_LOCK begin
@@ -140,6 +149,10 @@ end
 # --- counted-pool state transitions ---------------------------------------------------
 #
 # All of these run with REGISTRY_LOCK held.
+#
+# Invariant, maintained by `register_counted_pool!` (which pushes to both) and by
+# `_snapshot!` (which resizes): `length(SAVED) == length(MAXIMA) == length(COUNTED_POOLS)`,
+# and index `i` refers to the same pool in all three.
 
 @noinline function _apply!(n::Int)
     for pool in COUNTED_POOLS
@@ -158,7 +171,7 @@ end
 
 @noinline function _restore!()
     for (i, pool) in enumerate(COUNTED_POOLS)
-        i <= length(SAVED) && pool.set(SAVED[i])
+        pool.set(SAVED[i])
     end
     return nothing
 end

@@ -113,9 +113,29 @@ restriction.
     across sockets, by far more than the effects being measured. Paired, the control numbers
     reproduce to within 1% run to run.
 
+## A full budget raises, it does not merely permit
+
+The applied budget is written to every counted pool unconditionally, so a scope that works
+out to [`NestedThreading.capacity`](@ref) — [`with_full_threads`](@ref), or a loop with a
+single item — sets the pools *up* to that value, past a lower count the caller may have
+configured by hand:
+
+```julia
+BLAS.set_num_threads(2)
+@budgeted_threads for i in 1:1        # budget == capacity()
+    BLAS.get_num_threads()            # == capacity(), not 2
+end
+BLAS.get_num_threads()                # == 2 again
+```
+
+This is deliberate: it is what lets [`with_full_threads`](@ref) turn a default-off library
+such as NFFT on. The snapshot/restore applies as usual, so the hand-set value comes back
+when the scope closes — but a hand-tuned count is not honoured *inside* a full-throttle
+scope.
+
 ## Worked example
 
-With `Threads.nthreads() == 8`:
+With `Threads.threadpoolsize() == 8`:
 
 | loop | trip count | budget | BLAS/FFTW inside | Polyester/NFFT inside |
 | --- | --- | --- | --- | --- |

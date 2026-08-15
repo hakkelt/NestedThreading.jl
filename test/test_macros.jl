@@ -167,4 +167,16 @@ end
         acc[i] = i
     end
     @test acc == 1:8
+
+    # `@budgeted` over a chain containing `@batch` must auto-exclude the :polyester pool:
+    # the loop being budgeted *is* the Polyester consumer, so guarding it would serialize
+    # the very loop the macro was asked to parallelize. The trip count here is well above
+    # capacity(), so the budget is 1 and the guard would fire if it were not excluded.
+    n = NestedThreading.capacity()
+    tids = zeros(Int, 64 * n)
+    @budgeted @inbounds Polyester.@batch for i in eachindex(tids)
+        tids[i] = Threads.threadid()
+    end
+    n > 1 && @test length(unique(tids)) > 1
+    @test Probe.VALUE[] == 16                 # ...while counted pools were still budgeted
 end

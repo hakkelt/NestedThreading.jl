@@ -33,6 +33,15 @@ see [`GuardedPool`](@ref). Pass pool names in `exclude` to skip guarding a speci
 [`@budgeted_batch`](@ref) uses `exclude = (:polyester,)` because there the outer loop *is*
 the Polyester consumer.
 
+!!! note "A budget of `capacity()` raises, it does not merely permit"
+    The budget is applied to every counted pool unconditionally, so a scope whose budget
+    works out to [`capacity`](@ref) — `with_full_threads`, or a loop with a single item —
+    sets the pools *up* to that value for its duration, even past a lower count the caller
+    had configured (`BLAS.set_num_threads(2)`, say). The original counts are restored on
+    exit like any other scope. This is what makes `with_full_threads` able to turn NFFT
+    on; if a hand-tuned lower count must be preserved, do not open a full-throttle scope
+    around it.
+
 !!! note "Process-global state"
     BLAS and FFTW thread counts are process-global with no per-task scoping. Taking the
     minimum over all active scopes is deliberately conservative: while any task is
@@ -105,7 +114,7 @@ end
 The per-worker inner thread budget for a parallel loop over `range`:
 `max(1, capacity() ÷ length(range))`.
 
-With `Threads.nthreads() == 8`, a loop of 32 items gets budget 1 (the outer loop already
+With `capacity() == 8`, a loop of 32 items gets budget 1 (the outer loop already
 saturates the machine) while a loop of 2 items gets budget 4 (2 workers × 4 inner threads).
 Iterators of unknown length fall back to the conservative budget of 1.
 """

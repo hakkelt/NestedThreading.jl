@@ -12,6 +12,43 @@
     before = length(NT.COUNTED_POOLS)
     NT.register_counted_pool!(() -> 1, identity; name = :probe)
     @test length(NT.COUNTED_POOLS) == before
+    @test count(p -> p.name === :probe, NT.COUNTED_POOLS) == 1
+
+    # ...and the same for guarded pools.
+    before_guarded = length(NT.GUARDED_POOLS)
+    NT.register_guarded_pool!((f, budget) -> f(); name = :probe_guard)
+    @test length(NT.GUARDED_POOLS) == before_guarded
+    @test count(p -> p.name === :probe_guard, NT.GUARDED_POOLS) == 1
+
+    # The three parallel arrays stay index-aligned after all of that.
+    @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
+end
+
+@testitem "registering mid-scope joins the active restriction" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
+    # Registration is meant to happen at load time, but an extension can be loaded while
+    # some other task holds a budget scope open. The newcomer must pick up the restriction
+    # in force and be restored with everybody else, not be left throttled forever.
+    late = Ref(12)
+    NT.with_thread_budget(1) do
+        NT.register_counted_pool!(() -> late[], n -> (late[] = n); name = :late_probe)
+        @test late[] == 1                       # the restriction reached the newcomer
+    end
+    @test late[] == 12                          # ...and its own value came back
+
+    i = findfirst(p -> p.name === :late_probe, NT.COUNTED_POOLS)
+    @test i !== nothing
+    @test NT.MAXIMA[i] == 12
+    @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
+
+    # It now participates in ordinary scopes like any other pool.
+    NT.with_thread_budget(3) do
+        @test late[] == 3
+    end
+    @test late[] == 12
 end
 
 @testitem "scoped save/apply/restore" tags = [:registry] setup = [Probe] begin
@@ -125,6 +162,33 @@ end
         @test !Probe.guarded()
         @test Probe.VALUE[] == 1              # counted pools are still applied
     end
+
+    # A name that matches no registered guard is simply ignored, not an error — a caller
+    # may exclude a pool whose package is not loaded in this session.
+    Probe.reset!()
+    NT.with_thread_budget(1; exclude = (:not_a_pool,)) do
+        NT.capacity() > 1 && @test Probe.guarded()
+        @test Probe.VALUE[] == 1
+    end
+end
+
+@testitem "a full budget raises past a hand-set count" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
+    # The applied budget is written to every counted pool unconditionally, so a scope whose
+    # budget works out to capacity() sets the pools *up* to it, past a lower value the
+    # caller configured by hand. That is what lets `with_full_threads` turn a default-off
+    # library (NFFT) on; the hand-set value is restored on exit.
+    if NT.capacity() > 1
+        Probe.VALUE[] = 1
+        NT.with_full_threads() do
+            @test Probe.VALUE[] == NT.capacity()
+        end
+        @test Probe.VALUE[] == 1
+    end
+    Probe.reset!()
 end
 
 @testitem "budget_for" tags = [:registry] begin

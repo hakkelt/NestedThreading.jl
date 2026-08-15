@@ -1,5 +1,11 @@
 # NestedThreading.jl
 
+!!! note "Disclaimer"
+    This package was written mostly by Claude (Anthropic's coding assistant), under human
+    direction and review. The design decisions, benchmark numbers and documentation here
+    were produced that way; treat the code as you would any other third-party dependency
+    and read it before relying on it.
+
 Coordinate one CPU thread budget across independently-threaded libraries, so an outer
 parallel loop does not oversubscribe the machine with inner threading.
 
@@ -29,7 +35,7 @@ using NestedThreading
 end
 ```
 
-With `Threads.nthreads() == 8` the loop of 32 items already saturates the machine, so every
+With `Threads.threadpoolsize() == 8` the loop of 32 items already saturates the machine, so every
 registered library is limited to one thread inside the body. A loop of 2 items instead gets
 a budget of 4, for 2 workers × 4 inner threads. The arithmetic is
 `max(1, capacity() ÷ length(range))`, evaluated at runtime — the range may have a length that
