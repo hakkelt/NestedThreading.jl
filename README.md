@@ -1,5 +1,14 @@
 # NestedThreading.jl
 
+[![Tests](https://github.com/hakkelt/NestedThreading.jl/actions/workflows/tests.yml/badge.svg)](https://github.com/hakkelt/NestedThreading.jl/actions/workflows/tests.yml)
+[![Documentation](https://github.com/hakkelt/NestedThreading.jl/actions/workflows/documentation.yml/badge.svg)](https://hakkelt.github.io/NestedThreading.jl/dev/)
+[![codecov](https://codecov.io/gh/hakkelt/NestedThreading.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/hakkelt/NestedThreading.jl)
+
+> **Disclaimer:** this package was written mostly by Claude (Anthropic's coding assistant),
+> under human direction and review. The design decisions, benchmark numbers and
+> documentation in this repository were produced that way; treat the code as you would any
+> other third-party dependency and read it before relying on it.
+
 Coordinate one CPU thread budget across independently-threaded libraries, so an outer
 parallel loop does not oversubscribe the machine with inner threading.
 
@@ -23,8 +32,8 @@ end
 end
 ```
 
-The budget is `max(1, Threads.nthreads() ÷ length(range))`, computed at runtime, and applied
-around the loop — once per loop, not once per iteration.
+The budget is `max(1, Threads.threadpoolsize() ÷ length(range))`, computed at runtime, and
+applied around the loop — once per loop, not once per iteration.
 
 ## API
 
@@ -104,6 +113,10 @@ julia --project=test test/runtests.jl :benchmark   # local-only timing compariso
 Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:benchmark`. The
 benchmark items use BenchmarkTools with paired measurements and are excluded from the
 default run.
+
+CI runs the suite at 4 threads and, in a job of its own, at 1 — `capacity() == 1` collapses
+"restricted" and "full throttle" onto the same budget and is a real code path for every
+all-or-nothing pool. Worth running locally too: `julia -t 1 --project=test test/runtests.jl`.
 
 **Run them at the thread count you actually deploy with.** Whether budgeting helps depends
 on how `nthreads()` compares to the core count, and not by a small factor: on a 48-core

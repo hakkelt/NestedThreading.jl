@@ -1,0 +1,29 @@
+# Codecov configuration. Coverage is uploaded from the `ubuntu-latest` / Julia `1` leg of
+# the Tests workflow only (see .github/workflows/tests.yml); the other matrix legs run the
+# same suite, so uploading them all would only add noise.
+coverage:
+  precision: 1
+  round: down
+  range: "70...100"
+  status:
+    project:
+      default:
+        # Small package, few lines: a one-line change can move the percentage by more than
+        # a percent, so allow a little slack rather than failing PRs on rounding.
+        threshold: 1%
+    patch:
+      default:
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: true
+
+# Only `src/` and `ext/` are instrumented (julia-actions/julia-processcoverage), but list
+# the rest explicitly so a future change to that action does not silently start counting
+# test and docs files.
+ignore:
+  - "test/**"
+  - "docs/**"
+  - "benchmark/**"
