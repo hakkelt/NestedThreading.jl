@@ -32,7 +32,13 @@ end
     # Registration is meant to happen at load time, but an extension can be loaded while
     # some other task holds a budget scope open. The newcomer must pick up the restriction
     # in force and be restored with everybody else, not be left throttled forever.
-    late = Ref(12)
+    #
+    # `const`, not a plain global: `late_probe` stays registered in the global registry for
+    # the rest of the process, so its getter/setter closures must go on seeing a live `late`
+    # long after this test item itself has finished. TestItemRunner frees a plain global
+    # (not a `const` one) right after the item completes, which would otherwise turn every
+    # later `late[]` into a `MethodError` on `nothing`.
+    const late = Ref(12)
     NT.with_thread_budget(1) do
         NT.register_counted_pool!(() -> late[], n -> (late[] = n); name=:late_probe)
         @test late[] == 1                       # the restriction reached the newcomer
