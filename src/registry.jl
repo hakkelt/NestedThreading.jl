@@ -75,15 +75,27 @@ const GUARDED_POOLS = GuardedPool[]
 const MAXIMA = Int[]   # each pool's count at registration time (its "full throttle" value)
 const SAVED = Int[]    # snapshot taken on the empty -> non-empty ACTIVE transition
 
-# Multiset of currently-active restrictions. Each entry is `(id, budget, exclude, only)`:
-# `id` is a strictly-increasing tag identifying this particular `_enter!` call (so `_exit!`
-# can remove exactly the right entry without comparing the — abstractly-typed once pulled
-# out of this `Vector` — `exclude`/`only` tuples against each other; see `_exit!`),
-# `exclude` is a denylist of pool names this restriction does not apply to, and `only` is
-# either `nothing` (applies to every pool) or an allowlist of the only names it applies to.
-# A pool's effective budget is the minimum `budget` over entries that apply to it — see
-# `_applies`/`_effective_budget` below.
-const ACTIVE = Tuple{Int,Int,Tuple,Union{Nothing,Tuple}}[]
+"""
+    ActiveRestriction(id, budget, exclude, only)
+
+One entry of the [`ACTIVE`](@ref) multiset: a currently-open `with_thread_budget` scope.
+
+`id` is a strictly-increasing tag identifying this particular `_enter!` call (so `_exit!`
+can remove exactly the right entry without comparing `exclude`/`only` tuples against each
+other; see `_exit!`), `exclude` is a denylist of pool names this restriction does not apply
+to, and `only` is either `nothing` (applies to every pool) or an allowlist of the only names
+it applies to. A pool's effective budget is the minimum `budget` over entries that apply to
+it — see `_applies`/`_effective_budget` below.
+"""
+struct ActiveRestriction
+    id::Int
+    budget::Int
+    exclude::Tuple
+    only::Union{Nothing,Tuple}
+end
+
+# Multiset of currently-active restrictions.
+const ACTIVE = ActiveRestriction[]
 const _NEXT_ACTIVE_ID = Ref(0)   # protected by REGISTRY_LOCK, like ACTIVE itself
 
 const REGISTRY_LOCK = ReentrantLock()
@@ -202,9 +214,9 @@ to whatever the scope asked for": a pool with no applicable restriction is left 
 function _effective_budget(name::Symbol, default::Int)
     target = default
     found = false
-    for (_, budget, exclude, only) in ACTIVE
-        if _applies(name, exclude, only)
-            target = found ? min(target, budget) : budget
+    for restriction in ACTIVE
+        if _applies(name, restriction.exclude, restriction.only)
+            target = found ? min(target, restriction.budget) : restriction.budget
             found = true
         end
     end
@@ -254,7 +266,7 @@ function _enter!(budget::Int, exclude::Tuple, only)
     return @lock REGISTRY_LOCK begin
         isempty(ACTIVE) && _snapshot!()
         id = (_NEXT_ACTIVE_ID[] += 1)
-        push!(ACTIVE, (id, budget, exclude, only))
+        push!(ACTIVE, ActiveRestriction(id, budget, exclude, only))
         _apply!()
         (id, Int[_effective_budget(pool.name, capacity()) for pool in GUARDED_POOLS])
     end
@@ -269,7 +281,7 @@ remains active.
 """
 function _exit!(id::Int)
     @lock REGISTRY_LOCK begin
-        i = findfirst(e -> e[1] == id, ACTIVE)
+        i = findfirst(e -> e.id == id, ACTIVE)
         i === nothing || deleteat!(ACTIVE, i)
         if isempty(ACTIVE)
             _restore!()
