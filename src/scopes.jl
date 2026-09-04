@@ -2,36 +2,55 @@
 
 # Compose every registered guard around `f`. Recursive rather than a loop so the abstract
 # `guard` call is the only dynamic dispatch and it stays out of the caller's inlining.
-@noinline function _run_guarded(f::F, budget::Int, exclude::Tuple, i::Int) where {F}
+# `targets` is `GUARDED_POOLS`-aligned and already reflects every currently-active
+# restriction (including this one) and its `exclude`/`only`; a pool whose target is not
+# below `capacity()` is left unguarded.
+@noinline function _run_guarded(f::F, targets::Vector{Int}, i::Int) where {F}
     i > length(GUARDED_POOLS) && return f()
-    pool = GUARDED_POOLS[i]
-    if pool.name in exclude
-        return _run_guarded(f, budget, exclude, i + 1)
+    target = targets[i]
+    if target >= capacity()
+        return _run_guarded(f, targets, i + 1)
     end
-    return pool.guard(budget) do
-        _run_guarded(f, budget, exclude, i + 1)
+    pool = GUARDED_POOLS[i]
+    return pool.guard(target) do
+        _run_guarded(f, targets, i + 1)
     end
 end
 
 """
-    with_thread_budget(f, n::Integer; exclude = ())
+    with_thread_budget(f, n::Integer; exclude = (), only = nothing)
 
 Run `f()` with every registered threaded library limited to `n` threads, restoring the
 previous state afterwards (also on exception). Returns `f()`'s value.
 
-The budget actually applied is `minimum` over *all* budget scopes active in the process, so
+The budget actually applied to a pool is the `minimum` over every *currently-active*
+restriction that applies to that pool (see `exclude`/`only` below), so
 
 * nesting can only ever narrow, never widen, an outer restriction — an inner
   `with_thread_budget(f, 8)` inside an outer `with_thread_budget(g, 1)` still runs at 1;
 * concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted on
   the first entry and restored on the last exit.
 
-[`GuardedPool`](@ref)s are invoked only when the applied budget is below [`capacity`](@ref),
-and receive that budget. Polyester's guard switches it off outright rather than limiting it
-proportionally — a partial limit was tried and measured far worse in the saturated regime;
-see [`GuardedPool`](@ref). Pass pool names in `exclude` to skip guarding a specific pool;
-[`@budgeted_batch`](@ref) uses `exclude = (:polyester,)` because there the outer loop *is*
-the Polyester consumer.
+By default a restriction applies to every registered pool, [`CountedPool`](@ref)s and
+[`GuardedPool`](@ref)s alike. Two keywords narrow that:
+
+* `exclude`: a denylist of pool names this restriction does not apply to. Naming a pool
+  that turns out to be a [`CountedPool`](@ref) actually leaves it alone now — earlier this
+  only ever affected guards, and silently did nothing for a counted pool's budget, which
+  was a bug. Naming a pool that is not currently registered at all is not an error: a
+  caller may exclude a pool whose package is not loaded in this session.
+* `only`: an allowlist — when given, this restriction applies to *only* these pools and
+  none else, leaving everything unnamed alone entirely (not merely unrestricted-by-this-
+  scope: if no other active scope restricts it either, it keeps its pre-scope value even
+  past this scope's own budget). This is what `with_serial_blas`-style call sites need:
+  "restrict exactly these pools" is not expressible as a denylist without enumerating every
+  other pool, which breaks whenever a new one registers.
+
+[`GuardedPool`](@ref)s are invoked only when the budget applying to them is below
+[`capacity`](@ref), and receive that budget. Polyester's guard switches it off outright
+rather than limiting it proportionally — a partial limit was tried and measured far worse
+in the saturated regime; see [`GuardedPool`](@ref). [`@budgeted_batch`](@ref) uses
+`exclude = (:polyester,)` because there the outer loop *is* the Polyester consumer.
 
 !!! note "Guards are decided once, at entry"
     Counted pools follow the applied minimum for as long as the scope is open — another
@@ -48,13 +67,18 @@ the Polyester consumer.
     rather than from inside them.
 
 !!! note "A budget of `capacity()` raises, it does not merely permit"
-    The budget is applied to every counted pool unconditionally, so a scope whose budget
-    works out to [`capacity`](@ref) — `with_full_threads`, or a loop with a single item —
-    sets the pools *up* to that value for its duration, even past a lower count the caller
-    had configured (`BLAS.set_num_threads(2)`, say). The original counts are restored on
-    exit like any other scope. This is what makes `with_full_threads` able to turn NFFT
-    on; if a hand-tuned lower count must be preserved, do not open a full-throttle scope
-    around it.
+    The budget is applied to every counted pool this restriction applies to
+    unconditionally, so a scope whose budget works out to [`capacity`](@ref) —
+    `with_full_threads`, or a loop with a single item — sets those pools *up* to that
+    value for its duration, even past a lower count the caller had configured
+    (`BLAS.set_num_threads(2)`, say). The original counts are restored on exit like any
+    other scope. This is what makes `with_full_threads` able to turn NFFT on; if a
+    hand-tuned lower count must be preserved, do not open a full-throttle scope around it
+    — or `exclude`/`only` it out of one.
+
+    A pool named in `exclude`, or left out of `only`, is not "permitted" either way: as
+    long as nothing else currently active restricts it, it keeps whatever value it already
+    had, not the value this scope requested.
 
 !!! note "Process-global state"
     BLAS and FFTW thread counts are process-global with no per-task scoping. Taking the
@@ -65,31 +89,35 @@ the Polyester consumer.
 
 See also [`with_restricted_threads`](@ref), [`with_full_threads`](@ref).
 """
-function with_thread_budget(f::F, n::Integer; exclude::Tuple = ()) where {F}
+function with_thread_budget(
+    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+) where {F}
     budget = max(1, Int(n))
-    applied = _enter!(budget)
+    # `guarded_targets` is `GUARDED_POOLS`-aligned and already reflects every
+    # currently-active restriction, computed once at entry under the registry lock. Guards
+    # are lexical wrappers and so are decided here, once, and never revised — see the
+    # docstring for what that costs. Counted pools go on tracking the live minimum through
+    # `_enter!`/`_exit!` for as long as the scope is open.
+    id, guarded_targets = _enter!(budget, exclude, only)
     return try
-        # `applied` is the minimum at entry. Counted pools go on tracking the live minimum
-        # through `_enter!`/`_exit!`, but guards are lexical wrappers and so are decided
-        # here, once, and never revised — see the docstring for what that costs.
-        applied < capacity() ? _run_guarded(f, applied, exclude, 1) : f()
+        _run_guarded(f, guarded_targets, 1)
     finally
-        _exit!(budget)
+        _exit!(id)
     end
 end
 
 """
-    with_restricted_threads(f; exclude = ())
+    with_restricted_threads(f; exclude = (), only = nothing)
 
 Run `f()` with every registered threaded library limited to a single thread. Equivalent to
 `with_thread_budget(f, 1)`. Use at call sites that are not a plain `for` loop — a
 `@sync`/`@spawn` block, or a single call gated on a `Bool` field.
 """
-with_restricted_threads(f::F; exclude::Tuple = ()) where {F} =
-    with_thread_budget(f, 1; exclude)
+with_restricted_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+    with_thread_budget(f, 1; exclude, only)
 
 """
-    with_full_threads(f; exclude = ())
+    with_full_threads(f; exclude = (), only = nothing)
 
 Run `f()` requesting full threading: every [`CountedPool`](@ref) at [`capacity`](@ref) and
 every [`GuardedPool`](@ref) *enabled*. Unlike a plain unwrapped call this actively turns
@@ -99,8 +127,8 @@ with an explicit `threaded = true` switch needs.
 Still clamped by any outer restriction, so calling it inside a saturated batch loop is
 safe and does nothing.
 """
-with_full_threads(f::F; exclude::Tuple = ()) where {F} =
-    with_thread_budget(f, capacity(); exclude)
+with_full_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+    with_thread_budget(f, capacity(); exclude, only)
 
 """
     enable_full_threading()
@@ -136,6 +164,6 @@ saturates the machine) while a loop of 2 items gets budget 4 (2 workers × 4 inn
 Iterators of unknown length fall back to the conservative budget of 1.
 """
 budget_for(range) = _budget_for(Base.IteratorSize(range), range)
-_budget_for(::Union{Base.HasLength, Base.HasShape}, range) =
+_budget_for(::Union{Base.HasLength,Base.HasShape}, range) =
     max(1, capacity() ÷ max(1, length(range)))
 _budget_for(::Base.IteratorSize, _) = 1

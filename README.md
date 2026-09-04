@@ -50,6 +50,24 @@ Public but not exported: `NestedThreading.with_thread_budget(f, n)`,
 `register_counted_pool!`, `register_guarded_pool!`, `CountedPool`, `GuardedPool`,
 `capacity`, `budget_for`.
 
+Every scoping function (`with_thread_budget`, `with_restricted_threads`, `with_full_threads`)
+also takes `exclude` and `only` keywords to narrow which pools a restriction applies to — a
+pool a restriction does not apply to keeps whatever value it already has, not the value the
+scope requested:
+
+```julia
+# Restrict only BLAS/MKL to one thread, e.g. around a Krylov solve with BLAS-1 inside;
+# FFTW and everything else are left exactly as they are.
+with_restricted_threads(only = (:blas, :mkl)) do
+    cg!(x, A, b)
+end
+```
+
+`exclude` is a denylist (a name that is not currently registered is simply ignored, not an
+error — a caller may exclude a pool whose package is not loaded in this session); `only` is
+an allowlist and is the way to say "restrict exactly these pools, leave the rest alone"
+without having to enumerate every other pool.
+
 ## Supported libraries
 
 Registration happens automatically through package extensions — just have the package

@@ -74,7 +74,17 @@ const GUARDED_POOLS = GuardedPool[]
 # Parallel to COUNTED_POOLS:
 const MAXIMA = Int[]   # each pool's count at registration time (its "full throttle" value)
 const SAVED = Int[]    # snapshot taken on the empty -> non-empty ACTIVE transition
-const ACTIVE = Int[]   # multiset of currently-active requested budgets
+
+# Multiset of currently-active restrictions. Each entry is `(id, budget, exclude, only)`:
+# `id` is a strictly-increasing tag identifying this particular `_enter!` call (so `_exit!`
+# can remove exactly the right entry without comparing the — abstractly-typed once pulled
+# out of this `Vector` — `exclude`/`only` tuples against each other; see `_exit!`),
+# `exclude` is a denylist of pool names this restriction does not apply to, and `only` is
+# either `nothing` (applies to every pool) or an allowlist of the only names it applies to.
+# A pool's effective budget is the minimum `budget` over entries that apply to it — see
+# `_applies`/`_effective_budget` below.
+const ACTIVE = Tuple{Int,Int,Tuple,Union{Nothing,Tuple}}[]
+const _NEXT_ACTIVE_ID = Ref(0)   # protected by REGISTRY_LOCK, like ACTIVE itself
 
 const REGISTRY_LOCK = ReentrantLock()
 
@@ -120,7 +130,7 @@ function register_counted_pool!(get::Function, set::Function; name::Symbol)
             # Keep SAVED aligned with COUNTED_POOLS even when registering mid-scope, and
             # apply the restriction currently in force to the newcomer.
             push!(SAVED, current)
-            isempty(ACTIVE) || set(minimum(ACTIVE))
+            isempty(ACTIVE) || set(_effective_budget(name, current))
         end
     end
     return nothing
@@ -154,11 +164,58 @@ end
 # `_snapshot!` (which resizes): `length(SAVED) == length(MAXIMA) == length(COUNTED_POOLS)`,
 # and index `i` refers to the same pool in all three.
 
-@noinline function _apply!(n::Int)
-    for pool in COUNTED_POOLS
-        pool.set(n)
+"""
+    _name_in(name::Symbol, names::Tuple) -> Bool
+
+`name in names`, written as an explicit `===`-loop rather than `Base.in`/`==`. `names` is
+only ever known abstractly as `Tuple` once pulled out of `ACTIVE` (its concrete length
+varies per active restriction), and Julia's generic tuple `==` for two tuples whose
+concrete lengths are not statically known can widen to `Union{Missing, Bool}` — the path
+meant for tuples that might themselves hold `missing` elements, which pool names never do.
+`===` has no such case, so this is provably `Bool`, which `in`/`==` here would not be.
+"""
+function _name_in(name::Symbol, names::Tuple)
+    for n in names
+        n === name && return true
     end
-    return n
+    return false
+end
+
+"""
+    _applies(name::Symbol, exclude::Tuple, only) -> Bool
+
+Whether an active restriction with these `exclude`/`only` fields applies to the pool
+`name`: not denylisted, and either no allowlist or named in it.
+"""
+_applies(name::Symbol, exclude::Tuple, only) =
+    !_name_in(name, exclude) && (only === nothing || _name_in(name, only))
+
+"""
+    _effective_budget(name::Symbol, default::Int) -> Int
+
+The budget pool `name` should run at right now: the minimum `budget` over active
+restrictions that apply to it, or `default` (its pre-scope, unrestricted value) when none
+do. This is what makes `exclude`/`only` mean "leave this pool alone" rather than "clamp it
+to whatever the scope asked for": a pool with no applicable restriction is left at
+`default`, not forced down to it.
+"""
+function _effective_budget(name::Symbol, default::Int)
+    target = default
+    found = false
+    for (_, budget, exclude, only) in ACTIVE
+        if _applies(name, exclude, only)
+            target = found ? min(target, budget) : budget
+            found = true
+        end
+    end
+    return target
+end
+
+@noinline function _apply!()
+    for (i, pool) in enumerate(COUNTED_POOLS)
+        pool.set(_effective_budget(pool.name, SAVED[i]))
+    end
+    return nothing
 end
 
 @noinline function _snapshot!()
@@ -177,38 +234,47 @@ end
 end
 
 """
-    _enter!(n::Int) -> Int
+    _enter!(budget::Int, exclude::Tuple, only) -> (id::Int, guarded_targets::Vector{Int})
 
-Push a requested budget onto the active multiset and return the budget actually applied,
-which is `minimum(ACTIVE)`. On the transition from "no scope active" to "one scope active"
-the current counts are snapshotted so that the *last* exit can restore them.
+Push a requested restriction onto the active multiset, apply it to every counted pool, and
+return its `id` (to be handed back to [`_exit!`](@ref)) together with the per-
+[`GuardedPool`](@ref) budgets ([`GUARDED_POOLS`](@ref)-aligned) that this restriction,
+together with every other currently-active one, works out to. A guarded pool's entry is
+`capacity()` when nothing currently active restricts it, which is the caller's cue to skip
+guarding it entirely.
+
+On the transition from "no scope active" to "one scope active" the current counted-pool
+counts are snapshotted so that the *last* exit can restore them.
 
 This refcounting is what makes concurrent use safe: the snapshot is taken exactly once and
 restored exactly once, so no task can ever restore a value that was itself already
 restricted by another task.
 """
-function _enter!(n::Int)
+function _enter!(budget::Int, exclude::Tuple, only)
     return @lock REGISTRY_LOCK begin
         isempty(ACTIVE) && _snapshot!()
-        push!(ACTIVE, n)
-        _apply!(minimum(ACTIVE))
+        id = (_NEXT_ACTIVE_ID[] += 1)
+        push!(ACTIVE, (id, budget, exclude, only))
+        _apply!()
+        (id, Int[_effective_budget(pool.name, capacity()) for pool in GUARDED_POOLS])
     end
 end
 
 """
-    _exit!(n::Int)
+    _exit!(id::Int)
 
-Remove one occurrence of `n` from the active multiset. Restores the snapshot when the last
-scope exits, otherwise re-applies the new minimum.
+Remove the restriction tagged `id` (as returned by [`_enter!`](@ref)) from the active
+multiset. Restores the snapshot when the last scope exits, otherwise re-applies what
+remains active.
 """
-function _exit!(n::Int)
+function _exit!(id::Int)
     @lock REGISTRY_LOCK begin
-        i = findfirst(==(n), ACTIVE)
+        i = findfirst(e -> e[1] == id, ACTIVE)
         i === nothing || deleteat!(ACTIVE, i)
         if isempty(ACTIVE)
             _restore!()
         else
-            _apply!(minimum(ACTIVE))
+            _apply!()
         end
     end
     return nothing
