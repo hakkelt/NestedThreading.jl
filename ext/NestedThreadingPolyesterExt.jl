@@ -33,8 +33,17 @@ function _guard(f::F, budget::Int) where {F}
     return Polyester.disable_polyester_threads(f)
 end
 
+# Polyester's workers are Julia tasks that spin on a state word for ~2^20 `pause()` iterations
+# after a `@batch` region ends before parking themselves, so until then they are still
+# occupying Julia's threads and a `Threads.@threads` region opened in that window waits for
+# them rather than running on them. `ThreadingUtilities.sleep_all_tasks` parks them at once.
+# See `QuiescePool` for the measurements and
+# <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
+_quiesce() = Polyester.ThreadingUtilities.sleep_all_tasks()
+
 function __init__()
-    return NestedThreading.register_guarded_pool!(_guard; name = :polyester)
+    NestedThreading.register_guarded_pool!(_guard; name = :polyester)
+    return NestedThreading.register_quiesce_pool!(_quiesce; name = :polyester)
 end
 
 end # module NestedThreadingPolyesterExt

@@ -20,8 +20,24 @@
     @test length(NT.GUARDED_POOLS) == before_guarded
     @test count(p -> p.name === :probe_guard, NT.GUARDED_POOLS) == 1
 
+    # ...and the same for quiesce pools.
+    before_quiesce = length(NT.QUIESCE_POOLS)
+    NT.register_quiesce_pool!(() -> nothing; name = :probe_quiesce)
+    @test length(NT.QUIESCE_POOLS) == before_quiesce
+    @test count(p -> p.name === :probe_quiesce, NT.QUIESCE_POOLS) == 1
+
     # The three parallel arrays stay index-aligned after all of that.
     @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
+end
+
+@testitem "quiesce_foreign_pools calls every registered hook once" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    Probe.reset!()
+
+    quiesce_foreign_pools()
+    @test Probe.quiesce_count() == 1
+    quiesce_foreign_pools()
+    @test Probe.quiesce_count() == 2
 end
 
 @testitem "registering mid-scope joins the active restriction" tags = [:registry] setup = [Probe] begin
