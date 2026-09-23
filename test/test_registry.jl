@@ -457,6 +457,24 @@ end
     # soft default around it, it raised nothing.
     NT.with_thread_grant(Returns(nothing), 8)
     @test Probe.park_count() == 2
+
+    # Inside a partial hard limit -- a parallel loop whose workers may be inside the library --
+    # nothing is parked, though the grant still takes effect. A full-capacity limit, which a
+    # loop of one item opens, does not count.
+    if NT.capacity() > 2
+        NT.with_thread_default(1) do
+            NT.with_thread_budget(2) do
+                NT.with_thread_grant(8) do
+                    @test Probe.VALUE[] == 2
+                end
+            end
+            @test Probe.park_count() == 2
+            NT.with_thread_budget(NT.capacity()) do
+                NT.with_thread_grant(Returns(nothing), 8)
+            end
+            @test Probe.park_count() == 3
+        end
+    end
     Probe.reset!()
 end
 

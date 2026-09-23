@@ -45,10 +45,14 @@ took 31.0 ms, against 13.2 ms on an idle machine and 14.3 ms after `blas_thread_
 which itself took 0.35 ms. OpenBLAS starts the workers again at its next threaded call, for
 about 0.5–1 ms.
 
-The shutdown must not overlap a threaded OpenBLAS call on another task. [`_exit!`](@ref)
-runs it under the registry lock, which orders it against every other scope; a task that
-calls BLAS with no scope of its own, at a count a grant raised, is the one case it cannot
-order against.
+The shutdown must not overlap a threaded OpenBLAS call on another task: it tells every worker
+to exit and joins it, and a worker in the middle of another caller's work item never sees the
+request, so the join would hang. Two rules keep that from happening. [`_exit!`](@ref) runs the
+hook under the registry lock, which orders it against every other scope, and skips it while a
+hard limit strictly between 1 and [`capacity`](@ref) is open — the limit a
+[`@budgeted_threads`](@ref) loop with spare threads per worker opens, whose other workers may be
+in such a call. A task that calls BLAS with no scope of its own, at a count a grant raised, is
+the one case neither rule covers.
 
 MKL registers no hook: `omp_pause_resource_all` measured a smaller gain there and made the
 next threaded call much slower, and `KMP_BLOCKTIME` already bounds how long its workers spin.

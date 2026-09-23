@@ -273,11 +273,16 @@ released. It must therefore not wait on another task that opens a budget scope. 
 called when a plain [`with_thread_budget`](@ref) or [`with_thread_default`](@ref) scope closes:
 those lower nothing that was not lowered before they opened.
 
+It is not called either while a hard limit strictly between 1 and [`capacity`](@ref) is open
+around the pool. Such a limit is what [`@budgeted_threads`](@ref) opens for a loop with fewer
+items than threads, whose other workers may be inside a threaded call to the same library, at
+the count a grant raised, when this grant closes.
+
 !!! warning "Calls that bypass the scopes"
     The lock only orders the hook against other scopes. A task that calls into the library
     with no scope of its own, at a count a grant raised, may still be inside that call when
     the grant closes and the hook runs. Whether that is safe is the library's business; for
-    OpenBLAS, see the hook this package registers for `:blas`.
+    OpenBLAS it is not, see [`park_openblas`](@ref).
 
 Registering a hook for a `name` that already has one is a no-op. Registration is expected to
 happen at load time (`__init__`).
@@ -475,13 +480,27 @@ end
 _current_budgets() =
     Int[_effective_budget(pool.name, SAVED[i]) for (i, pool) in enumerate(COUNTED_POOLS)]
 
-# The park hooks of the pools whose count is now below `before`.
+# Whether a hard limit strictly between 1 and `capacity()` applies to pool `name`: the mark of
+# a parallel loop whose workers each got more than one thread, i.e. of sibling tasks that may be
+# inside a threaded call to this very pool right now, at a count some grant raised.
+function _partial_limit_open(name::Symbol)
+    for restriction in ACTIVE
+        restriction.kind === :limit || continue
+        1 < restriction.budget < capacity() || continue
+        _applies(name, restriction.exclude, restriction.only) && return true
+    end
+    return false
+end
+
+# The park hooks of the pools whose count is now below `before`. A pool is not parked while a
+# partial hard limit is open around it: parking OpenBLAS under a threaded call on another task
+# is not safe, and inside a loop with spare threads per worker such a call may be in flight.
 function _lowered_park_hooks(before::Vector{Int})
     hooks = ParkHook[]
     isempty(PARK_HOOKS) && return hooks
     for (i, pool) in enumerate(COUNTED_POOLS)
-        now = isempty(ACTIVE) ? SAVED[i] : _effective_budget(pool.name, SAVED[i])
-        if now < before[i]
+        now = _effective_budget(pool.name, SAVED[i])
+        if now < before[i] && !_partial_limit_open(pool.name)
             for hook in PARK_HOOKS
                 hook.name === pool.name && push!(hooks, hook)
             end
