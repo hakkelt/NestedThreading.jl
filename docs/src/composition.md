@@ -164,6 +164,45 @@ such as NFFT on. The snapshot/restore applies as usual, so the hand-set value co
 when the scope closes — but a hand-tuned count is not honoured *inside* a full-throttle
 scope.
 
+## Hard limits, soft defaults and grants
+
+A hard limit is the right tool for a batch loop, and the wrong one for a computation whose
+calls into a library are mostly too small to thread but a few of which are large. An iterative
+solver is the typical case: its vector updates want serial BLAS, its occasional SVD wants every
+thread. Under a hard limit of 1 the SVD runs serial too, since nothing nested can widen it.
+
+So there are three kinds of scope, and a pool's count is worked out from those open that apply
+to it:
+
+| scope | kind | combines with its own kind by |
+| --- | --- | --- |
+| [`NestedThreading.with_thread_budget`](@ref) | hard limit | minimum |
+| [`NestedThreading.with_thread_default`](@ref) | soft default | minimum |
+| [`NestedThreading.with_thread_grant`](@ref) | grant | maximum |
+
+The highest grant wins over every soft default, but never goes past the count the process runs
+the pool at with no scope open. Without a grant, the lowest soft default applies. Without
+either, the lowest hard limit applies. Whichever it is is then clamped to the lowest hard limit.
+
+```julia
+with_thread_default(1; only = (:blas,)) do
+    BLAS.get_num_threads()                            # 1
+    with_thread_grant(8; only = (:blas,)) do
+        BLAS.get_num_threads()                        # 8
+    end
+    with_thread_budget(1) do                          # a saturated batch worker
+        with_thread_grant(8; only = (:blas,)) do
+            BLAS.get_num_threads()                    # 1: a grant never beats a limit
+        end
+    end
+end
+```
+
+When a grant closes and a pool's count goes down, that pool's
+[`NestedThreading.ParkHook`](@ref)s run. The one this package registers shuts OpenBLAS's
+worker threads down, which would otherwise spin for about 0.1 s on the cores the caller wants
+next; see [`NestedThreading.park_openblas`](@ref).
+
 ## Worked example
 
 With `Threads.threadpoolsize() == 8`:

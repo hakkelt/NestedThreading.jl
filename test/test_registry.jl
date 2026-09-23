@@ -341,3 +341,176 @@ end
     @test Probe.VALUE[] == original
     @test BLAS.get_num_threads() == original
 end
+
+@testitem "soft defaults yield to grants, grants yield to limits" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
+    NT.with_thread_default(1) do
+        @test Probe.VALUE[] == 1
+        NT.with_thread_grant(8) do
+            @test Probe.VALUE[] == 8                  # a grant overrides the soft default
+        end
+        @test Probe.VALUE[] == 1
+        NT.with_thread_budget(4) do                   # a limit is a ceiling, not a request
+            @test Probe.VALUE[] == 1
+            NT.with_thread_grant(8) do
+                @test Probe.VALUE[] == 4              # ...and a grant never passes it
+            end
+        end
+        NT.with_thread_budget(1) do
+            NT.with_thread_grant(8) do
+                @test Probe.VALUE[] == 1
+            end
+        end
+    end
+    @test Probe.VALUE[] == 16
+
+    # A limit opened around the soft default clamps it the same way.
+    NT.with_thread_budget(2) do
+        NT.with_thread_default(6) do
+            @test Probe.VALUE[] == 2
+            NT.with_thread_grant(8) do
+                @test Probe.VALUE[] == 2
+            end
+        end
+    end
+
+    # With no soft default open, a grant neither lowers a pool nor raises it past the
+    # unrestricted value.
+    NT.with_thread_grant(8) do
+        @test Probe.VALUE[] == 16
+    end
+    Probe.VALUE[] = 3
+    NT.with_thread_grant(8) do
+        @test Probe.VALUE[] == 3
+    end
+    @test Probe.VALUE[] == 3
+    Probe.reset!()
+    @test isempty(NT.ACTIVE)
+end
+
+@testitem "soft defaults combine by minimum, grants by maximum" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
+    NT.with_thread_default(4) do
+        NT.with_thread_default(2) do
+            @test Probe.VALUE[] == 2
+            NT.with_thread_default(6) do
+                @test Probe.VALUE[] == 2
+            end
+            NT.with_thread_grant(5) do
+                @test Probe.VALUE[] == 5
+                NT.with_thread_grant(3) do
+                    @test Probe.VALUE[] == 5
+                end
+                NT.with_thread_grant(9) do
+                    @test Probe.VALUE[] == 9
+                end
+                @test Probe.VALUE[] == 5
+            end
+        end
+        @test Probe.VALUE[] == 4
+    end
+    @test Probe.VALUE[] == 16
+
+    # `only` scopes a soft default like any other entry.
+    NT.with_thread_default(1; only = (:blas,)) do
+        @test Probe.VALUE[] == 16
+    end
+end
+
+@testitem "park hooks run when a grant lowers their pool" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+    Probe.reset!()
+
+    NT.with_thread_default(1) do
+        NT.with_thread_grant(8) do
+            @test Probe.park_count() == 0
+        end
+        @test Probe.park_count() == 1               # 8 -> 1
+
+        # A grant that raised nothing parks nothing.
+        NT.with_thread_budget(1) do
+            NT.with_thread_grant(Returns(nothing), 8)
+        end
+        @test Probe.park_count() == 1
+
+        # Nor does the inner of two grants, while the outer keeps the pool up.
+        NT.with_thread_grant(8) do
+            NT.with_thread_grant(Returns(nothing), 8)
+            @test Probe.park_count() == 1
+        end
+        @test Probe.park_count() == 2
+    end
+
+    # Limits and soft defaults never park, even when their exit lowers nothing or restores.
+    NT.with_thread_budget(Returns(nothing), 2)
+    NT.with_thread_default(Returns(nothing), 2)
+    @test Probe.park_count() == 2
+
+    # A grant that is the last scope open parks only if the restore lowers the pool; with no
+    # soft default around it, it raised nothing.
+    NT.with_thread_grant(Returns(nothing), 8)
+    @test Probe.park_count() == 2
+    Probe.reset!()
+end
+
+@testitem "concurrent defaults, grants and limits keep the invariants" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, LinearAlgebra
+    const NT = NestedThreading
+    Probe.reset!()
+
+    original = BLAS.get_num_threads()
+    violations = Threads.Atomic{Int}(0)
+    tasks = map(1:24) do i
+        Threads.@spawn begin
+            for _ in 1:40
+                limit = 1 + (i % 3)
+                NT.with_thread_budget(limit) do
+                    NT.with_thread_default(1) do
+                        NT.with_thread_grant(8) do
+                            # Whatever else is open, nothing may exceed this task's limit.
+                            Probe.VALUE[] > limit && Threads.atomic_add!(violations, 1)
+                            yield()
+                            Probe.VALUE[] > limit && Threads.atomic_add!(violations, 1)
+                        end
+                        Probe.VALUE[] > limit && Threads.atomic_add!(violations, 1)
+                    end
+                end
+            end
+        end
+    end
+    foreach(wait, tasks)
+
+    @test violations[] == 0
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
+    @test BLAS.get_num_threads() == original
+end
+
+@testitem "the OpenBLAS park hook leaves BLAS usable" tags = [:registry] begin
+    using NestedThreading, LinearAlgebra
+    const NT = NestedThreading
+
+    @test any(h -> h.name === :blas && h.park === NT.park_openblas, NT.PARK_HOOKS)
+    A = randn(256, 256)
+    expected = A * A
+    original = BLAS.get_num_threads()
+    NT.with_thread_default(1; only = (:blas,)) do
+        for _ in 1:3
+            NT.with_thread_grant(NT.capacity(); only = (:blas,)) do
+                @test A * A ≈ expected
+            end
+            @test BLAS.get_num_threads() == 1
+            @test A * A ≈ expected                      # after the workers were shut down
+        end
+    end
+    @test BLAS.get_num_threads() == original
+    NT.park_openblas()                                  # also callable with nothing open
+    @test A * A ≈ expected
+end
