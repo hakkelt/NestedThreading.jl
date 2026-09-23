@@ -24,6 +24,9 @@ purpose — that is exactly the state a downstream package would see.
     # Quiesce pool: counts how often it was asked to release Julia's threads.
     const QUIESCED = Threads.Atomic{Int}(0)
 
+    # Park hook of the counted pool: counts how often it ran.
+    const PARKED = Threads.Atomic{Int}(0)
+
     function register!()
         NT.register_counted_pool!(
             () -> VALUE[],
@@ -39,6 +42,10 @@ purpose — that is exactly the state a downstream package would see.
                 Threads.atomic_sub!(DEPTH, 1)
             end
         end
+        NT.register_park_hook!(name = :probe) do
+            Threads.atomic_add!(PARKED, 1)
+            nothing
+        end
         return NT.register_quiesce_pool!(name = :probe_quiesce) do
             Threads.atomic_add!(QUIESCED, 1)
             nothing
@@ -53,8 +60,12 @@ purpose — that is exactly the state a downstream package would see.
         APPLIED[] = Int[]
         BUDGETS[] = Int[]
         QUIESCED[] = 0
+        PARKED[] = 0
         return nothing
     end
+
+    "How often the counted pool's park hook ran since the last `reset!`."
+    park_count() = PARKED[]
 
     "How often the quiesce pool was asked to release Julia's threads since the last `reset!`."
     quiesce_count() = QUIESCED[]
