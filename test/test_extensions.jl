@@ -79,3 +79,59 @@ end
         NFFT._use_threads[] = original
     end
 end
+
+@testitem "quiescing Polyester never drops a concurrent @batch chunk" tags = [:extensions] begin
+    using NestedThreading, Polyester
+    const NT = NestedThreading
+
+    # Every other task runs a `@batch` while its neighbours quiesce. A quiesce that parks a
+    # worker another task has just launched a chunk on makes that chunk vanish: the worker runs
+    # the park request instead, the launching task sees it finish, and part of its output is
+    # never written.
+    if NT.capacity() > 2
+        n = 1 << 14
+        dropped = Threads.Atomic{Int}(0)
+        for _ in 1:200
+            Threads.@threads for k in 1:(2 * Threads.nthreads())
+                if isodd(k)
+                    y = fill(NaN, n)
+                    Polyester.@batch for i in 1:n
+                        y[i] = i
+                    end
+                    any(isnan, y) && Threads.atomic_add!(dropped, 1)
+                else
+                    NT.quiesce_foreign_pools()
+                end
+            end
+        end
+        @test dropped[] == 0
+    end
+end
+
+@testitem "a restricted scope parks the Polyester workers it reserves" tags = [:extensions] begin
+    using NestedThreading, Polyester
+    const NT = NestedThreading
+    const TU = Polyester.ThreadingUtilities
+
+    states() = [TU._atomic_state(TU.taskpointer(tid)) for tid in eachindex(TU.TASKS)]
+    # In a function, so that the scope opens while the workers are still spinning after the
+    # loop rather than after they have given up and parked by themselves.
+    function states_inside_scope(y)
+        Polyester.@batch for i in eachindex(y)
+            y[i] = i
+        end
+        return NT.with_thread_budget(states, 2)
+    end
+
+    if NT.capacity() > 2
+        y = zeros(1 << 12)
+        states_inside_scope(y)
+        @test all(==(TU.WAIT), states_inside_scope(y))
+        # Released, not left reserved: a later loop still spreads over them.
+        tids = zeros(Int, Threads.nthreads())
+        Polyester.@batch per = thread for i in eachindex(tids)
+            tids[i] = Threads.threadid()
+        end
+        @test length(unique(tids)) > 1
+    end
+end
