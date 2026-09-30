@@ -228,3 +228,42 @@ end
     n > 1 && @test length(unique(tids)) > 1
     @test Probe.VALUE[] == 16                 # ...while counted pools were still budgeted
 end
+
+@testitem "the Julia-scheduler macros quiesce foreign pools, the Polyester ones do not" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    import Polyester
+    Probe.reset!()
+
+    # A `Threads.@threads` region must not open while another library's workers are still
+    # spinning on Julia's threads, so the macros that emit one ask them to let go first.
+    out = zeros(Int, 8)
+    @budgeted_threads for i in 1:8
+        out[i] = i
+    end
+    @test out == 1:8
+    @test Probe.quiesce_count() == 1
+
+    @budgeted Threads.@threads for i in 1:8
+        out[i] = 2i
+    end
+    @test Probe.quiesce_count() == 2
+
+    # `@budgeted_batch`, and `@budgeted` over a `@batch`, are Polyester's own regions: asking
+    # Polyester to park the workers it is about to use again would be pure overhead, so the
+    # same `exclude = (:polyester,)` that keeps the guard off also keeps the quiesce off.
+    @budgeted_batch for i in 1:8
+        out[i] = 3i
+    end
+    @test Probe.quiesce_count() == 2
+
+    @budgeted @inbounds Polyester.@batch for i in 1:8
+        out[i] = 4i
+    end
+    @test Probe.quiesce_count() == 2
+
+    # The sequential branch opens no parallel region at all.
+    @budgeted_threads threads = false for i in 1:8
+        out[i] = 5i
+    end
+    @test Probe.quiesce_count() == 2
+end

@@ -89,16 +89,25 @@ function _reject_parallel_chain(chain, macroname, emitted)
     return nothing
 end
 
+# A loop that is itself a `Polyester.@batch` is the Polyester pool's own region, so quiescing
+# it would only make it re-acquire its workers a line later. Every other loop here runs on
+# Julia's scheduler and must not open while a foreign pool is still spinning on its threads —
+# see `QuiescePool`.
+_quiesce_expr(exclude::Tuple) =
+    :polyester in exclude ? nothing : :($(GlobalRef(NestedThreading, :quiesce_foreign_pools))())
+
 function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity)
     var, range, body = _split_for(loop)
     rangevar, budgetvar = gensym("range"), gensym("budget")
     parallel = _rewrap(chain, mkparallel(Expr(:for, Expr(:(=), var, rangevar), body)))
+    quiesce = _quiesce_expr(exclude)
     return quote
         let $rangevar = $range,
                 $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
             $(GlobalRef(NestedThreading, :with_thread_budget))(
                 $budgetvar; exclude = $exclude
             ) do
+                $quiesce
                 $parallel
             end
         end
@@ -115,6 +124,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
     if cond === true
         return _budgeted_expr(Expr(:for, Expr(:(=), var, range), body), chain, exclude, mkparallel)
     end
+    quiesce = _quiesce_expr(exclude)
     return quote
         let $rangevar = $range
             if $cond
@@ -122,6 +132,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
                     $(GlobalRef(NestedThreading, :with_thread_budget))(
                         $budgetvar; exclude = $exclude
                     ) do
+                        $quiesce
                         $parallel
                     end
                 end

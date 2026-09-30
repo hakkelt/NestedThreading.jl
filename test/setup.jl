@@ -21,13 +21,16 @@ purpose — that is exactly the state a downstream package would see.
     const BUDGETS = Ref{Vector{Int}}(Int[])
     const LOCK = ReentrantLock()
 
+    # Quiesce pool: counts how often it was asked to release Julia's threads.
+    const QUIESCED = Threads.Atomic{Int}(0)
+
     function register!()
         NT.register_counted_pool!(
             () -> VALUE[],
             n -> (VALUE[] = n; @lock LOCK push!(APPLIED[], n); n);
             name = :probe,
         )
-        return NT.register_guarded_pool!(name = :probe_guard) do f, budget
+        NT.register_guarded_pool!(name = :probe_guard) do f, budget
             @lock LOCK push!(BUDGETS[], budget)
             Threads.atomic_add!(DEPTH, 1)
             try
@@ -35,6 +38,10 @@ purpose — that is exactly the state a downstream package would see.
             finally
                 Threads.atomic_sub!(DEPTH, 1)
             end
+        end
+        return NT.register_quiesce_pool!(name = :probe_quiesce) do
+            Threads.atomic_add!(QUIESCED, 1)
+            nothing
         end
     end
 
@@ -45,8 +52,12 @@ purpose — that is exactly the state a downstream package would see.
         VALUE[] = 16
         APPLIED[] = Int[]
         BUDGETS[] = Int[]
+        QUIESCED[] = 0
         return nothing
     end
+
+    "How often the quiesce pool was asked to release Julia's threads since the last `reset!`."
+    quiesce_count() = QUIESCED[]
 
     "Index of the probe pool in the parallel `MAXIMA`/`SAVED` arrays."
     probe_index() = findfirst(p -> p.name === :probe, NT.COUNTED_POOLS)
