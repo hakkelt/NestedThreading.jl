@@ -47,7 +47,7 @@ about 0.5–1 ms.
 
 The shutdown must not overlap a threaded OpenBLAS call on another task: it tells every worker
 to exit and joins it, and a worker in the middle of another caller's work item never sees the
-request, so the join would hang. Two rules keep that from happening. [`_exit!`](@ref) runs the
+request, so the join would hang. Two rules keep that from happening. `_exit!` runs the
 hook under the registry lock, which orders it against every other scope, and skips it while a
 hard limit strictly between 1 and [`capacity`](@ref) is open — the limit a
 [`@budgeted_threads`](@ref) loop with spare threads per worker opens, whose other workers may be
