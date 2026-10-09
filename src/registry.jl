@@ -111,23 +111,56 @@ const MAXIMA = Int[]   # each pool's count at registration time (its "full throt
 const SAVED = Int[]    # snapshot taken on the empty -> non-empty ACTIVE transition
 
 """
-    ActiveRestriction(id, budget, exclude, only)
+    ParkHook(name::Symbol, park)
 
-One entry of the [`ACTIVE`](@ref) multiset: a currently-open `with_thread_budget` scope.
+A function that makes the [`CountedPool`](@ref) `name` release the cores its idle workers
+are still holding, called after a [`with_thread_grant`](@ref) scope that had raised that
+pool closes and lowers it again.
+
+OpenBLAS is the case this exists for. Lowering its thread count does not stop the workers
+it no longer uses: they go on spinning for `OPENBLAS_THREAD_TIMEOUT` (by default 2^28
+cycles, about 0.1 s) before they sleep, on cores the caller's own threads now want. A
+grant that raises BLAS for one factorization inside a solve that otherwise runs it serial
+would leave that spin behind after every factorization.
+
+Register with [`register_park_hook!`](@ref).
+"""
+struct ParkHook
+    name::Symbol
+    park::Function
+end
+
+"""
+    ActiveRestriction(id, budget, exclude, only, kind)
+
+One entry of the [`ACTIVE`](@ref) multiset: a currently-open budget scope.
 
 `id` is a strictly-increasing tag identifying this particular `_enter!` call (so `_exit!`
 can remove exactly the right entry without comparing `exclude`/`only` tuples against each
 other; see `_exit!`), `exclude` is a denylist of pool names this restriction does not apply
 to, and `only` is either `nothing` (applies to every pool) or an allowlist of the only names
-it applies to. A pool's effective budget is the minimum `budget` over entries that apply to
-it — see `_applies`/`_effective_budget` below.
+it applies to.
+
+`kind` says how the entry combines with the others that apply to the same pool:
+
+* `:limit` — a hard limit, from [`with_thread_budget`](@ref). Nothing nested inside it can
+  exceed it.
+* `:default` — a soft default, from [`with_thread_default`](@ref): the count to run at
+  unless a grant says otherwise.
+* `:grant` — a grant, from [`with_thread_grant`](@ref): a call that is known to be worth
+  threading, overriding every soft default but no hard limit.
+
+See `_effective_budget` below for the arithmetic.
 """
 struct ActiveRestriction
     id::Int
     budget::Int
     exclude::Tuple
     only::Union{Nothing,Tuple}
+    kind::Symbol
 end
+
+const PARK_HOOKS = ParkHook[]
 
 # Multiset of currently-active restrictions.
 const ACTIVE = ActiveRestriction[]
@@ -228,6 +261,42 @@ function register_quiesce_pool!(quiesce::Function; name::Symbol)
 end
 
 """
+    register_park_hook!(park; name::Symbol)
+
+Register `park()` to be called whenever a [`with_thread_grant`](@ref) scope closes and the
+[`CountedPool`](@ref) `name` goes down as a result, so that the library can release the cores
+its now-unused workers would otherwise go on spinning on; see [`ParkHook`](@ref).
+
+`park` is called with no arguments, after the pool's count has already been lowered, with
+the registry lock held: no grant can open and start using the workers while they are being
+released. It must therefore not wait on another task that opens a budget scope. It is not
+called when a plain [`with_thread_budget`](@ref) or [`with_thread_default`](@ref) scope closes:
+those lower nothing that was not lowered before they opened.
+
+It is not called either while a hard limit strictly between 1 and [`capacity`](@ref) is open
+around the pool. Such a limit is what [`@budgeted_threads`](@ref) opens for a loop with fewer
+items than threads, whose other workers may be inside a threaded call to the same library, at
+the count a grant raised, when this grant closes.
+
+!!! warning "Calls that bypass the scopes"
+    The lock only orders the hook against other scopes. A task that calls into the library
+    with no scope of its own, at a count a grant raised, may still be inside that call when
+    the grant closes and the hook runs. Whether that is safe is the library's business; for
+    OpenBLAS it is not, see [`park_openblas`](@ref).
+
+Registering a hook for a `name` that already has one is a no-op. Registration is expected to
+happen at load time (`__init__`).
+"""
+function register_park_hook!(park::Function; name::Symbol)
+    @lock REGISTRY_LOCK begin
+        if !any(h -> h.name === name, PARK_HOOKS)
+            push!(PARK_HOOKS, ParkHook(name, park))
+        end
+    end
+    return nothing
+end
+
+"""
     quiesce_foreign_pools()
 
 Ask every registered [`QuiescePool`](@ref) to release Julia's worker threads, so that a region
@@ -286,22 +355,47 @@ _applies(name::Symbol, exclude::Tuple, only) =
 """
     _effective_budget(name::Symbol, default::Int) -> Int
 
-The budget pool `name` should run at right now: the minimum `budget` over active
-restrictions that apply to it, or `default` (its pre-scope, unrestricted value) when none
-do. This is what makes `exclude`/`only` mean "leave this pool alone" rather than "clamp it
-to whatever the scope asked for": a pool with no applicable restriction is left at
-`default`, not forced down to it.
+The budget pool `name` should run at right now, given the active entries that apply to it
+and `default`, its pre-scope, unrestricted value:
+
+1. With a soft default open, the lowest soft default.
+2. Otherwise, with a hard limit open, the lowest hard limit (which may exceed `default`:
+   that is how [`with_full_threads`](@ref) turns a default-off library on).
+3. Otherwise `default`.
+
+With a grant open, that is raised to the highest grant, but never past `default`: a grant
+restores threading a soft default took away, it neither lowers a pool nor raises it past what
+the process runs it at when nothing is open. Whichever it is, it is then clamped to the lowest
+hard limit, so nothing can widen past a limit that is open around it.
+
+A pool with no applicable entry is left at `default`, not forced down to it, which is what
+makes `exclude`/`only` mean "leave this pool alone" rather than "clamp it to whatever the
+scope asked for".
 """
 function _effective_budget(name::Symbol, default::Int)
-    target = default
-    found = false
+    limit = typemax(Int)
+    has_limit = false
+    grant = 0
+    has_grant = false
+    soft = typemax(Int)
+    has_soft = false
     for restriction in ACTIVE
-        if _applies(name, restriction.exclude, restriction.only)
-            target = found ? min(target, restriction.budget) : restriction.budget
-            found = true
+        _applies(name, restriction.exclude, restriction.only) || continue
+        kind = restriction.kind
+        if kind === :grant
+            grant = max(grant, restriction.budget)
+            has_grant = true
+        elseif kind === :default
+            soft = min(soft, restriction.budget)
+            has_soft = true
+        else
+            limit = min(limit, restriction.budget)
+            has_limit = true
         end
     end
-    return target
+    target = has_soft ? soft : has_limit ? limit : default
+    has_grant && (target = max(target, min(grant, default)))
+    return min(target, limit)
 end
 
 @noinline function _apply!()
@@ -327,10 +421,11 @@ end
 end
 
 """
-    _enter!(budget::Int, exclude::Tuple, only) -> (id::Int, guarded_targets::Vector{Int})
+    _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
+        -> (id::Int, guarded_targets::Vector{Int})
 
 Push a requested restriction onto the active multiset, apply it to every counted pool, and
-return its `id` (to be handed back to [`_exit!`](@ref)) together with the per-
+return its `id` (to be handed back to `_exit!`) together with the per-
 [`GuardedPool`](@ref) budgets ([`GUARDED_POOLS`](@ref)-aligned) that this restriction,
 together with every other currently-active one, works out to. A guarded pool's entry is
 `capacity()` when nothing currently active restricts it, which is the caller's cue to skip
@@ -343,11 +438,11 @@ This refcounting is what makes concurrent use safe: the snapshot is taken exactl
 restored exactly once, so no task can ever restore a value that was itself already
 restricted by another task.
 """
-function _enter!(budget::Int, exclude::Tuple, only)
+function _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
     return @lock REGISTRY_LOCK begin
         isempty(ACTIVE) && _snapshot!()
         id = (_NEXT_ACTIVE_ID[] += 1)
-        push!(ACTIVE, ActiveRestriction(id, budget, exclude, only))
+        push!(ACTIVE, ActiveRestriction(id, budget, exclude, only, kind))
         _apply!()
         (id, Int[_effective_budget(pool.name, capacity()) for pool in GUARDED_POOLS])
     end
@@ -359,16 +454,64 @@ end
 Remove the restriction tagged `id` (as returned by [`_enter!`](@ref)) from the active
 multiset. Restores the snapshot when the last scope exits, otherwise re-applies what
 remains active.
+
+When the entry was a grant, every [`ParkHook`](@ref) whose pool went down as a result is
+called afterwards, still under the lock, so that no other grant can open and start using the
+workers while they are being released.
 """
 function _exit!(id::Int)
     @lock REGISTRY_LOCK begin
         i = findfirst(e -> e.id == id, ACTIVE)
+        was_grant = i !== nothing && ACTIVE[i].kind === :grant
+        before = was_grant ? _current_budgets() : Int[]
         i === nothing || deleteat!(ACTIVE, i)
         if isempty(ACTIVE)
             _restore!()
         else
             _apply!()
         end
+        was_grant && _run_park_hooks(_lowered_park_hooks(before))
+    end
+    return nothing
+end
+
+# The count every counted pool is applied at right now, `COUNTED_POOLS`-aligned. Only called
+# with the lock held and at least one entry active.
+_current_budgets() =
+    Int[_effective_budget(pool.name, SAVED[i]) for (i, pool) in enumerate(COUNTED_POOLS)]
+
+# Whether a hard limit strictly between 1 and `capacity()` applies to pool `name`: the mark of
+# a parallel loop whose workers each got more than one thread, i.e. of sibling tasks that may be
+# inside a threaded call to this very pool right now, at a count some grant raised.
+function _partial_limit_open(name::Symbol)
+    for restriction in ACTIVE
+        restriction.kind === :limit || continue
+        1 < restriction.budget < capacity() || continue
+        _applies(name, restriction.exclude, restriction.only) && return true
+    end
+    return false
+end
+
+# The park hooks of the pools whose count is now below `before`. A pool is not parked while a
+# partial hard limit is open around it: parking OpenBLAS under a threaded call on another task
+# is not safe, and inside a loop with spare threads per worker such a call may be in flight.
+function _lowered_park_hooks(before::Vector{Int})
+    hooks = ParkHook[]
+    isempty(PARK_HOOKS) && return hooks
+    for (i, pool) in enumerate(COUNTED_POOLS)
+        now = _effective_budget(pool.name, SAVED[i])
+        if now < before[i] && !_partial_limit_open(pool.name)
+            for hook in PARK_HOOKS
+                hook.name === pool.name && push!(hooks, hook)
+            end
+        end
+    end
+    return hooks
+end
+
+@noinline function _run_park_hooks(hooks::Vector{ParkHook})
+    for hook in hooks
+        hook.park()
     end
     return nothing
 end

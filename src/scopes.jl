@@ -92,18 +92,89 @@ See also [`with_restricted_threads`](@ref), [`with_full_threads`](@ref).
 function with_thread_budget(
     f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
 ) where {F}
+    return _with_scope(f, n, exclude, only, :limit)
+end
+
+function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where {F}
     budget = max(1, Int(n))
     # `guarded_targets` is `GUARDED_POOLS`-aligned and already reflects every
     # currently-active restriction, computed once at entry under the registry lock. Guards
     # are lexical wrappers and so are decided here, once, and never revised — see the
     # docstring for what that costs. Counted pools go on tracking the live minimum through
     # `_enter!`/`_exit!` for as long as the scope is open.
-    id, guarded_targets = _enter!(budget, exclude, only)
+    id, guarded_targets = _enter!(budget, exclude, only, kind)
     return try
         _run_guarded(f, guarded_targets, 1)
     finally
         _exit!(id)
     end
+end
+
+"""
+    with_thread_default(f, n::Integer; exclude = (), only = nothing)
+
+Run `f()` with every registered threaded library at `n` threads *by default*: the count it
+runs at unless a [`with_thread_grant`](@ref) nested inside says a particular call is worth
+more. Returns `f()`'s value.
+
+This is the scope to open around a whole computation whose calls into a library are mostly
+too small to benefit from its threads, but some of which are not. A hard
+[`with_thread_budget`](@ref) cannot express that: nothing nested inside it can widen past it,
+so the few large calls would run serial too.
+
+Soft defaults combine with each other by minimum, and yield to a grant. They do not yield to
+nothing else: a hard limit open around or inside a soft default still clamps it, and a soft
+default of `n` below a hard limit of `m > n` runs at `n`, since the limit is a ceiling and not
+a request.
+
+```julia
+with_thread_default(1; only = (:blas,)) do     # small BLAS calls: serial
+    for iteration in 1:100
+        axpy!(a, x, y)                          # BLAS at 1 thread
+        with_thread_grant(capacity(); only = (:blas,)) do
+            svd!(big)                           # BLAS at every thread
+        end
+    end
+end
+```
+
+See [`with_thread_budget`](@ref) for `exclude`, `only` and what is process-global.
+"""
+function with_thread_default(
+    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+) where {F}
+    return _with_scope(f, n, exclude, only, :default)
+end
+
+"""
+    with_thread_grant(f, n::Integer; exclude = (), only = nothing)
+
+Run `f()` with every registered threaded library allowed `n` threads *despite* any soft
+default in force ([`with_thread_default`](@ref)), for a call that is known to be large
+enough to be worth threading. Returns `f()`'s value.
+
+A grant overrides soft defaults but never a hard limit: inside a
+[`with_thread_budget`](@ref)`(g, 1)` — a worker of a saturated outer parallel loop, say — a
+grant does nothing. It also never raises a pool past the count the process runs it at when
+no scope is open: it restores threading that a soft default took away, it does not add
+threads a caller turned off by hand with, e.g., `BLAS.set_num_threads(1)`. Several grants open
+at once combine by maximum.
+
+When a grant closes and a pool's count goes down as a result, the pool's
+[`ParkHook`](@ref)s run, so that a library whose idle workers would otherwise go on spinning
+(OpenBLAS) releases them. That costs something (about a millisecond for OpenBLAS, counting
+the pool's restart at the next grant), so a grant belongs around a call that is worth
+several milliseconds, not around a small one. Decide whether a call is large enough
+*before* opening the scope, as every call site in the operator stack does, rather than
+opening one per call and letting it do nothing: opening a scope costs a lock and a pass over
+the registry either way.
+
+See [`with_thread_budget`](@ref) for `exclude`, `only` and what is process-global.
+"""
+function with_thread_grant(
+    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+) where {F}
+    return _with_scope(f, n, exclude, only, :grant)
 end
 
 """
