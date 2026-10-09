@@ -45,10 +45,17 @@ applied around the loop — once per loop, not once per iteration.
 | `with_restricted_threads(f)` | limit everything to one thread for the duration of `f()` — for call sites that are not loops |
 | `with_full_threads(f)` | actively request full threading (still clamped by any outer restriction) |
 | `enable_full_threading()` | process-wide escape hatch: set the baseline back to full throttle |
+| `quiesce_foreign_pools()` | make other libraries' workers let go of Julia's threads before you open a region on them |
 
 Public but not exported: `NestedThreading.with_thread_budget(f, n)`,
-`register_counted_pool!`, `register_guarded_pool!`, `CountedPool`, `GuardedPool`,
-`capacity`, `budget_for`.
+`register_counted_pool!`, `register_guarded_pool!`, `register_quiesce_pool!`, `CountedPool`,
+`GuardedPool`, `QuiescePool`, `capacity`, `budget_for`.
+
+`quiesce_foreign_pools` is the answer to a failure mode budgeting cannot address: Polyester's
+workers are Julia tasks that keep spinning for a while after a `@batch` region ends, and a
+`Threads.@threads` region opened in that window waits for those threads rather than running on
+them — 5.7 µs against 219.9 µs for an empty loop on 8 threads. The loop macros above call it for
+themselves; call it directly before a hand-written `Threads.@threads` or `@spawn` region.
 
 Every scoping function (`with_thread_budget`, `with_restricted_threads`, `with_full_threads`)
 also takes `exclude` and `only` keywords to narrow which pools a restriction applies to — a

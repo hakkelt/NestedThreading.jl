@@ -50,6 +50,40 @@ struct GuardedPool
     guard::Function
 end
 
+"""
+    QuiescePool(name::Symbol, quiesce)
+
+A threaded library whose workers keep *occupying* Julia's threads after one of its parallel
+regions has finished, and which can be told to let go. `quiesce()` is called immediately
+before this package opens a region on Julia's own scheduler.
+
+Polyester is the case this exists for. Its workers are Julia tasks that spin on a state word
+for about 2^20 `pause()` iterations before parking, so for the whole of that window the Julia
+threads they sit on are busy. A `Threads.@threads` region opened in that window does not get
+those threads; it waits for them. Measured on an AMD EPYC 7352, 8 Julia threads, Julia 1.13.0,
+2026-09-21, with an empty loop body:
+
+    Threads.@threads, in a process that has never run a `@batch`     5.7 us
+    Threads.@threads, after one `@batch` has run                   219.9 us
+    Threads.@threads, after `@batch` + quiesce                      18.6 us
+    the quiesce call itself                                          0.1 us
+    Polyester.@batch, after a quiesce                                5.0 us
+
+A 38x penalty, removed for a tenth of a microsecond, and re-waking the workers for the next
+`@batch` costs nothing measurable. See the Polyester extension and
+<https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
+
+Unlike [`GuardedPool`](@ref) this is not scoped and takes no budget: it is a one-shot "release
+the threads now" with no paired restore, because the library re-acquires what it needs at its
+next region on its own.
+
+Register with [`register_quiesce_pool!`](@ref).
+"""
+struct QuiescePool
+    name::Symbol
+    quiesce::Function
+end
+
 # Separate concretely-typed vectors (rather than one Vector{Union{...}}) so that iteration
 # stays inference-friendly.
 #
@@ -70,6 +104,7 @@ end
 # once per `mul!` — never once per loop iteration.
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
+const QUIESCE_POOLS = QuiescePool[]
 
 # Parallel to COUNTED_POOLS:
 const MAXIMA = Int[]   # each pool's count at registration time (its "full throttle" value)
@@ -164,6 +199,52 @@ function register_guarded_pool!(guard::Function; name::Symbol)
         if !any(p -> p.name === name, GUARDED_POOLS)
             push!(GUARDED_POOLS, GuardedPool(name, guard))
         end
+    end
+    return nothing
+end
+
+"""
+    register_quiesce_pool!(quiesce; name::Symbol)
+
+Register a library whose workers hold onto Julia's threads between its own parallel regions.
+`quiesce` is called with no arguments before this package opens a region on Julia's
+scheduler, and must make that library release them; see [`QuiescePool`](@ref) for why this
+exists and what it is worth.
+
+```julia
+NestedThreading.register_quiesce_pool!(MyLib.park_workers!; name = :mylib)
+```
+
+Registering a `name` that is already present is a no-op. Registration is expected to happen at
+load time (`__init__`).
+"""
+function register_quiesce_pool!(quiesce::Function; name::Symbol)
+    @lock REGISTRY_LOCK begin
+        if !any(p -> p.name === name, QUIESCE_POOLS)
+            push!(QUIESCE_POOLS, QuiescePool(name, quiesce))
+        end
+    end
+    return nothing
+end
+
+"""
+    quiesce_foreign_pools()
+
+Ask every registered [`QuiescePool`](@ref) to release Julia's worker threads, so that a region
+about to be opened on Julia's own scheduler can actually use them.
+
+[`@budgeted_threads`](@ref) and [`@budgeted`](@ref) call this for themselves, except when the
+loop they are wrapping is a `Polyester.@batch` — there the Polyester pool *is* the loop. Call
+it directly before a hand-written `Threads.@threads` or `@spawn` region that does not go
+through those macros.
+
+It is a plain call with no paired restore, costs about 0.1 µs with Polyester loaded, and is a
+no-op when nothing is registered. It is safe to call when no foreign region has run: parked
+workers stay parked.
+"""
+@noinline function quiesce_foreign_pools()
+    for pool in QUIESCE_POOLS
+        pool.quiesce()
     end
     return nothing
 end

@@ -65,6 +65,26 @@ Switching the library fully off is usually right even when a partial limit is av
     Polyester is safe because `disable_polyester_threads` *reserves* worker threads rather
     than saving and restoring a count.
 
+## Quiesce pools
+
+A separate question from "how many threads may this library use": does it let go of Julia's
+threads once its own parallel region has ended? Polyester's workers do not — they are Julia
+tasks that spin for about 2^20 `pause()` iterations before parking, and a `Threads.@threads`
+region opened during that window waits for them instead of running on them. On 8 threads with
+an empty loop body that is 5.7 µs against 219.9 µs.
+
+Register a hook that makes the library release them, and this package calls it before every
+region it opens on Julia's own scheduler:
+
+```julia
+NestedThreading.register_quiesce_pool!(MyLib.park_workers!; name = :mylib)
+```
+
+The hook takes no arguments, has no paired restore, and must be cheap — the Polyester one is
+`ThreadingUtilities.sleep_all_tasks()` at about 0.1 µs, and re-waking the workers for the next
+`@batch` costs nothing measurable. A library whose workers park themselves promptly needs no
+quiesce pool at all.
+
 ## Doing it from an extension
 
 Registration belongs in `__init__` so that it happens exactly once, when both your package
