@@ -425,7 +425,7 @@ end
         -> (id::Int, guarded_targets::Vector{Int})
 
 Push a requested restriction onto the active multiset, apply it to every counted pool, and
-return its `id` (to be handed back to [`_exit!`](@ref)) together with the per-
+return its `id` (to be handed back to `_exit!`) together with the per-
 [`GuardedPool`](@ref) budgets ([`GUARDED_POOLS`](@ref)-aligned) that this restriction,
 together with every other currently-active one, works out to. A guarded pool's entry is
 `capacity()` when nothing currently active restricts it, which is the caller's cue to skip
