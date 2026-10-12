@@ -87,6 +87,7 @@ loaded:
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]`, on only when nothing is restricted |
 | Polyester | guarded | `disable_polyester_threads` |
+| Strided | counted | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
 
 MKL gets its own pool alongside the always-on BLAS one, rather than instead of it:
 `BLAS.set_num_threads` goes through libblastrampoline, which is supposed to forward to

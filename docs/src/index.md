@@ -91,6 +91,7 @@ Registration is automatic via package extensions — have the package loaded and
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]` |
 | Polyester | guarded | `disable_polyester_threads` |
+| Strided | counted | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
 
 MKL gets its own pool alongside the always-on BLAS one: `BLAS.set_num_threads` is supposed
 to forward to MKL through libblastrampoline, but the two do not reliably stay in sync
