@@ -533,49 +533,152 @@ end
     @test A * A ≈ expected
 end
 
-@testitem "thread_limit reports the hard limit in force" tags = [:registry] setup = [Probe] begin
+@testitem "thread_limit reports the enclosing hard limit" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading
 
     @test thread_limit(:probe) == typemax(Int)
-    with_restricted_threads() do
-        @test thread_limit(:probe) == 1
-        @test thread_limit(:blas) == 1
-        # An unregistered name reports what a pool of that name would be held to.
-        @test thread_limit(:not_registered) == 1
-    end
-    @test thread_limit(:probe) == typemax(Int)
-
-    # Nested limits combine by minimum, and the outer one survives the inner one's exit.
-    NT.with_thread_budget(3) do
-        @test thread_limit(:probe) == 3
-        NT.with_thread_budget(2) do
-            @test thread_limit(:probe) == 2
-        end
-        @test thread_limit(:probe) == 3
-    end
-
-    # `exclude`/`only` decide which pools a limit applies to.
-    NT.with_thread_budget(1; exclude = (:probe,)) do
-        @test thread_limit(:probe) == typemax(Int)
-        @test thread_limit(:blas) == 1
-    end
-    NT.with_thread_budget(1; only = (:probe,)) do
-        @test thread_limit(:probe) == 1
-        @test thread_limit(:blas) == typemax(Int)
-    end
-
-    # Soft defaults and grants bound nothing, so they do not count.
-    NT.with_thread_default(1) do
-        @test thread_limit(:probe) == typemax(Int)
-        NT.with_thread_grant(4) do
+    if VERSION < v"1.11"
+        # No `ScopedValue`: enclosing scopes are not tracked, so nothing is reported.
+        with_restricted_threads() do
             @test thread_limit(:probe) == typemax(Int)
         end
-    end
-    NT.with_thread_budget(2) do
-        NT.with_thread_grant(4) do
-            @test thread_limit(:probe) == 2
+    else
+        with_restricted_threads() do
+            @test thread_limit(:probe) == 1
+            @test thread_limit(:blas) == 1
+            # An unregistered name reports what a pool of that name would be held to.
+            @test thread_limit(:not_registered) == 1
+            # A task spawned inside the scope runs inside it too.
+            @test fetch(Threads.@spawn thread_limit(:probe)) == 1
         end
+        @test thread_limit(:probe) == typemax(Int)
+
+        # Nested limits combine by minimum, and the outer one survives the inner one's exit.
+        NT.with_thread_budget(3) do
+            @test thread_limit(:probe) == 3
+            NT.with_thread_budget(2) do
+                @test thread_limit(:probe) == 2
+            end
+            @test thread_limit(:probe) == 3
+        end
+
+        # `exclude`/`only` decide which pools a limit applies to.
+        NT.with_thread_budget(1; exclude = (:probe,)) do
+            @test thread_limit(:probe) == typemax(Int)
+            @test thread_limit(:blas) == 1
+        end
+        NT.with_thread_budget(1; only = (:probe,)) do
+            @test thread_limit(:probe) == 1
+            @test thread_limit(:blas) == typemax(Int)
+        end
+
+        # Soft defaults and grants bound nothing, so they do not count.
+        NT.with_thread_default(1) do
+            @test thread_limit(:probe) == typemax(Int)
+            NT.with_thread_grant(4) do
+                @test thread_limit(:probe) == typemax(Int)
+            end
+        end
+        NT.with_thread_budget(2) do
+            NT.with_thread_grant(4) do
+                @test thread_limit(:probe) == 2
+            end
+        end
+
+        # A limit another task holds is not this task's: it may close at any moment.
+        opened, release = Channel{Nothing}(1), Channel{Nothing}(1)
+        holder = Threads.@spawn with_restricted_threads() do
+            put!(opened, nothing)
+            take!(release)
+        end
+        take!(opened)
+        @test thread_limit(:probe) == typemax(Int)
+        put!(release, nothing)
+        wait(holder)
     end
     @test isempty(NT.ACTIVE)
+end
+
+@testitem "a nested limit that could change nothing is not entered" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+
+    Probe.reset!()
+    # On 1.10 every scope is entered; the fast path needs `ScopedValue`.
+    skips = VERSION >= v"1.11"
+    with_restricted_threads() do
+        applied = copy(Probe.APPLIED[])
+        guarded = copy(Probe.BUDGETS[])
+        active = length(NT.ACTIVE)
+        # Same or larger budget, every pool already held at 1 by this enclosing scope: a
+        # no-op, so nothing is entered, no counted pool is set and no guard runs again.
+        @test with_restricted_threads(() -> length(NT.ACTIVE)) == active + !skips
+        @test NT.with_thread_budget(() -> length(NT.ACTIVE), 3) == active + !skips
+        # ...and the same inside a task spawned in the scope, a batch-loop worker's case.
+        @test fetch(Threads.@spawn with_restricted_threads(() -> length(NT.ACTIVE))) == active + !skips
+        if skips
+            @test Probe.APPLIED[] == applied
+            @test Probe.BUDGETS[] == guarded
+        end
+        @test Probe.VALUE[] == 1
+        # The body's value and exceptions still come through.
+        @test with_restricted_threads(() -> 42) == 42
+        @test_throws ErrorException with_restricted_threads(() -> error("boom"))
+        @test length(NT.ACTIVE) == active
+    end
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
+
+    # A smaller budget is entered.
+    NT.with_thread_budget(4) do
+        active = length(NT.ACTIVE)
+        NT.with_thread_budget(2) do
+            @test length(NT.ACTIVE) == active + 1
+            @test Probe.VALUE[] == 2
+        end
+        @test Probe.VALUE[] == 4
+    end
+
+    # An outer limit that leaves a pool out does not make the inner one a no-op.
+    NT.with_thread_budget(1; exclude = (:probe,)) do
+        active = length(NT.ACTIVE)
+        with_restricted_threads() do
+            @test length(NT.ACTIVE) == active + 1
+            @test Probe.VALUE[] == 1
+        end
+        @test Probe.VALUE[] == 16
+    end
+    # ...but an inner one confined to the pools the outer covers is.
+    NT.with_thread_budget(1; only = (:probe,)) do
+        active = length(NT.ACTIVE)
+        NT.with_thread_budget(1; only = (:probe,)) do
+            @test length(NT.ACTIVE) == active + !skips
+        end
+    end
+
+    # A soft default around the call is not a hard limit, so the inner limit is entered.
+    NT.with_thread_default(1) do
+        active = length(NT.ACTIVE)
+        with_restricted_threads() do
+            @test length(NT.ACTIVE) == active + 1
+        end
+    end
+
+    # A limit an unrelated task holds does not make this task's limit a no-op: it is entered,
+    # and stays in force after the other task's scope closes.
+    opened, release = Channel{Nothing}(1), Channel{Nothing}(1)
+    holder = Threads.@spawn with_restricted_threads() do
+        put!(opened, nothing)
+        take!(release)
+    end
+    take!(opened)
+    with_restricted_threads() do
+        @test length(NT.ACTIVE) == 2
+        put!(release, nothing)
+        wait(holder)
+        @test Probe.VALUE[] == 1
+    end
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
 end

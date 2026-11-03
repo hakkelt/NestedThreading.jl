@@ -31,6 +31,11 @@ saturated regime, because at high thread counts a nested parallel loop is catast
 however few workers it gets. See the Polyester extension for the numbers. `budget` is passed
 anyway so a library with a genuinely proportional control can use it.
 
+A guard must act for the whole process while it is held, not only for the calling task:
+Polyester's reserves its workers, which every task then finds taken. A hard limit nested in
+one that already covers this pool does not call the guard again (see `_limit_in_force`),
+so the enclosing scope's guard is all that restricts a nested call on another task.
+
 Unlike [`CountedPool`](@ref) this field cannot be a `FunctionWrapper`: the guard receives an
 arbitrary caller closure, whose type is not known until the call site, so one runtime
 dispatch per guarded scope is inherent. It happens once per budget scope, not once per loop
@@ -475,44 +480,89 @@ function _exit!(id::Int)
     return nothing
 end
 
+# The hard limits opened by the scopes that enclose the calling task, innermost last.
+# A `ScopedValue`, so a task spawned inside a scope -- each worker of a `@budgeted_threads`
+# loop -- inherits its parent's, while a scope another, unrelated task has open is not in it.
+# That distinction is the whole point: only an enclosing scope is guaranteed to stay open
+# while the calling task runs. `Base.ScopedValues` arrived in Julia 1.11; on 1.10 nothing is
+# recorded, which turns the check below off rather than making it guess.
+@static if VERSION >= v"1.11"
+    const _ENCLOSING_LIMITS = Base.ScopedValues.ScopedValue{Vector{ActiveRestriction}}(
+        ActiveRestriction[]
+    )
+    _enclosing_limits() = _ENCLOSING_LIMITS[]
+    _with_enclosing_limit(f::F, r::ActiveRestriction) where {F} =
+        Base.ScopedValues.with(f, _ENCLOSING_LIMITS => [_ENCLOSING_LIMITS[]; r])
+else
+    _enclosing_limits() = ActiveRestriction[]
+    _with_enclosing_limit(f::F, ::ActiveRestriction) where {F} = f()
+end
+
 """
     thread_limit(name::Symbol) -> Int
 
-The hard limit the open scopes put on pool `name`: the smallest `n` among the active
-[`with_thread_budget`](@ref) scopes (and so [`with_restricted_threads`](@ref), a limit of 1)
-that apply to it, or `typemax(Int)` when none does.
-
-This is what a caller checks to skip opening a scope that could not change anything. A
-library call that must run serial opens `with_restricted_threads` around itself, which takes
-the registry lock and sets every counted pool twice -- about 5 us, more than a small `gemv`
-costs. Inside a [`@budgeted_threads`](@ref) loop whose workers got one thread each the pool is
-already held at 1, so
-
-```julia
-thread_limit(:blas) <= 1 ? f() : with_restricted_threads(f)
-```
-
-runs `f()` exactly as the scope would, for the price of one uncontended lock.
+The hard limit the scopes enclosing the calling task put on pool `name`: the smallest `n`
+among the [`with_thread_budget`](@ref) scopes (and so [`with_restricted_threads`](@ref), a
+limit of 1) that apply to it and that this task runs inside -- opened by it, or by a task it
+was spawned from while the scope was open -- or `typemax(Int)` when there is none. A scope
+open on an unrelated task does not count: it may close at any moment.
 
 Soft defaults ([`with_thread_default`](@ref)) and grants ([`with_thread_grant`](@ref)) are not
-counted: neither bounds the count, since a grant opened later on another task may raise a pool
-held only by a soft default. A hard limit cannot be raised from inside, so a `thread_limit`
-that is already low stays at least that low until the scope that set it exits, which on a
-nested call is never before the call returns.
+counted, since neither bounds the count. The name does not have to be registered.
 
-The name does not have to be registered: the result is what a pool of that name would be
-limited to.
+`with_thread_budget` already uses this to skip a nested limit that could change nothing, so a
+caller needs it only to ask about one pool in particular -- to skip a scope where a limit on
+that pool alone is in force, say.
+
+On Julia 1.10, which has no `ScopedValue`, enclosing scopes are not tracked and this always
+returns `typemax(Int)`: a caller that acts on it then enters its scope, as it would anyway.
 """
-function thread_limit(name::Symbol)
-    return @lock REGISTRY_LOCK begin
-        limit = typemax(Int)
-        for restriction in ACTIVE
-            restriction.kind === :limit || continue
-            _applies(name, restriction.exclude, restriction.only) || continue
-            limit = min(limit, restriction.budget)
-        end
-        limit
+thread_limit(name::Symbol) = _hard_limit(name, _enclosing_limits())
+
+function _hard_limit(name::Symbol, limits::Vector{ActiveRestriction})
+    limit = typemax(Int)
+    for restriction in limits
+        _applies(name, restriction.exclude, restriction.only) || continue
+        limit = min(limit, restriction.budget)
     end
+    return limit
+end
+
+"""
+    _limit_in_force(budget::Int, exclude::Tuple, only) -> Bool
+
+Whether a hard limit of `budget` with these `exclude`/`only` fields would be a no-op for the
+calling task: some enclosing scope holds every registered counted and guarded pool the new
+limit applies to at or below `budget`.
+
+Such a limit changes no pool's effective budget -- soft defaults and grants are clamped by
+the enclosing hard limits, which the new one could only repeat -- and its guards would only
+repeat the ones the enclosing scope already holds, so [`with_thread_budget`](@ref) runs its
+body without entering it. That is the nested serial call inside a saturated
+[`@budgeted_threads`](@ref) loop: entering would take the registry lock, set every counted
+pool on the way in and out, and run every guard.
+
+Only enclosing scopes count (see `_ENCLOSING_LIMITS`), since the skipped call relies on the
+scope that made it a no-op staying open until it returns. That holds on the task that opened
+the scope and on every task its body waits for; a task spawned inside a scope and never
+waited for can outlive it, and then runs unrestricted once the scope exits. It also relies
+on a guard acting for the whole process while it is held (see [`GuardedPool`](@ref)).
+"""
+function _limit_in_force(budget::Int, exclude::Tuple, only)
+    limits = _enclosing_limits()
+    isempty(limits) && return false
+    return @lock REGISTRY_LOCK begin
+        _covers(COUNTED_POOLS, limits, budget, exclude, only) &&
+            _covers(GUARDED_POOLS, limits, budget, exclude, only)
+    end
+end
+
+function _covers(pools, limits, budget::Int, exclude::Tuple, only)
+    for pool in pools
+        _applies(pool.name, exclude, only) || continue
+        _hard_limit(pool.name, limits) <= budget || return false
+    end
+    return true
 end
 
 # The count every counted pool is applied at right now, `COUNTED_POOLS`-aligned. Only called
