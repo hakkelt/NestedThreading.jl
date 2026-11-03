@@ -32,17 +32,19 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         with:
-          # Instrumentation costs time and only one leg is uploaded, so collect it there.
-          coverage: ${{ matrix.os == 'ubuntu-latest' && matrix.julia-version == '1' }}
+          # Instrumentation costs time, so it is collected on the Ubuntu legs only. Both Julia
+          # versions upload, and Codecov merges them: code that only one version runs, such as
+          # the 1.10 fallback for `Base.ScopedValues` in `registry.jl`, is still counted.
+          coverage: ${{ matrix.os == 'ubuntu-latest' }}
       - uses: julia-actions/julia-processcoverage@v1
-        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+        if: matrix.os == 'ubuntu-latest'
         with:
           # Both the package and its extensions; the default already covers these, but the
           # extensions carry real logic (the NFFT boolean mapping, the Polyester guard) and
           # dropping them from coverage silently would be easy to miss.
           directories: src,ext
       - uses: codecov/codecov-action@v5
-        if: matrix.os == 'ubuntu-latest' && matrix.julia-version == '1'
+        if: matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
