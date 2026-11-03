@@ -475,6 +475,46 @@ function _exit!(id::Int)
     return nothing
 end
 
+"""
+    thread_limit(name::Symbol) -> Int
+
+The hard limit the open scopes put on pool `name`: the smallest `n` among the active
+[`with_thread_budget`](@ref) scopes (and so [`with_restricted_threads`](@ref), a limit of 1)
+that apply to it, or `typemax(Int)` when none does.
+
+This is what a caller checks to skip opening a scope that could not change anything. A
+library call that must run serial opens `with_restricted_threads` around itself, which takes
+the registry lock and sets every counted pool twice -- about 5 us, more than a small `gemv`
+costs. Inside a [`@budgeted_threads`](@ref) loop whose workers got one thread each the pool is
+already held at 1, so
+
+```julia
+thread_limit(:blas) <= 1 ? f() : with_restricted_threads(f)
+```
+
+runs `f()` exactly as the scope would, for the price of one uncontended lock.
+
+Soft defaults ([`with_thread_default`](@ref)) and grants ([`with_thread_grant`](@ref)) are not
+counted: neither bounds the count, since a grant opened later on another task may raise a pool
+held only by a soft default. A hard limit cannot be raised from inside, so a `thread_limit`
+that is already low stays at least that low until the scope that set it exits, which on a
+nested call is never before the call returns.
+
+The name does not have to be registered: the result is what a pool of that name would be
+limited to.
+"""
+function thread_limit(name::Symbol)
+    return @lock REGISTRY_LOCK begin
+        limit = typemax(Int)
+        for restriction in ACTIVE
+            restriction.kind === :limit || continue
+            _applies(name, restriction.exclude, restriction.only) || continue
+            limit = min(limit, restriction.budget)
+        end
+        limit
+    end
+end
+
 # The count every counted pool is applied at right now, `COUNTED_POOLS`-aligned. Only called
 # with the lock held and at least one entry active.
 _current_budgets() =

@@ -532,3 +532,50 @@ end
     NT.park_openblas()                                  # also callable with nothing open
     @test A * A ≈ expected
 end
+
+@testitem "thread_limit reports the hard limit in force" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+
+    @test thread_limit(:probe) == typemax(Int)
+    with_restricted_threads() do
+        @test thread_limit(:probe) == 1
+        @test thread_limit(:blas) == 1
+        # An unregistered name reports what a pool of that name would be held to.
+        @test thread_limit(:not_registered) == 1
+    end
+    @test thread_limit(:probe) == typemax(Int)
+
+    # Nested limits combine by minimum, and the outer one survives the inner one's exit.
+    NT.with_thread_budget(3) do
+        @test thread_limit(:probe) == 3
+        NT.with_thread_budget(2) do
+            @test thread_limit(:probe) == 2
+        end
+        @test thread_limit(:probe) == 3
+    end
+
+    # `exclude`/`only` decide which pools a limit applies to.
+    NT.with_thread_budget(1; exclude = (:probe,)) do
+        @test thread_limit(:probe) == typemax(Int)
+        @test thread_limit(:blas) == 1
+    end
+    NT.with_thread_budget(1; only = (:probe,)) do
+        @test thread_limit(:probe) == 1
+        @test thread_limit(:blas) == typemax(Int)
+    end
+
+    # Soft defaults and grants bound nothing, so they do not count.
+    NT.with_thread_default(1) do
+        @test thread_limit(:probe) == typemax(Int)
+        NT.with_thread_grant(4) do
+            @test thread_limit(:probe) == typemax(Int)
+        end
+    end
+    NT.with_thread_budget(2) do
+        NT.with_thread_grant(4) do
+            @test thread_limit(:probe) == 2
+        end
+    end
+    @test isempty(NT.ACTIVE)
+end

@@ -30,7 +30,9 @@ end
     @test_opt target_modules = (NT,) NT.budget_for(CartesianIndices((4, 4)))
     @test_opt target_modules = (NT,) NT.budget_for(Iterators.filter(isodd, 1:10))
     @test_opt target_modules = (NT,) NT.capacity()
+    @test_opt target_modules = (NT,) NT.thread_limit(:blas)
     @test_call target_modules = (NT,) NT.budget_for(1:8)
+    @test_call target_modules = (NT,) NT.thread_limit(:blas)
 end
 
 @testitem "JET: scoped entry points" tags = [:jet] begin

@@ -25,7 +25,7 @@ using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
     with_restricted_threads, with_full_threads, enable_full_threading,
-    quiesce_foreign_pools
+    quiesce_foreign_pools, thread_limit
 
 include("registry.jl")
 include("scopes.jl")
