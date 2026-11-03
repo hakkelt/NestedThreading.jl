@@ -552,17 +552,16 @@ function _limit_in_force(budget::Int, exclude::Tuple, only)
     limits = _enclosing_limits()
     isempty(limits) && return false
     return @lock REGISTRY_LOCK begin
-        _covers(COUNTED_POOLS, limits, budget, exclude, only) &&
-            _covers(GUARDED_POOLS, limits, budget, exclude, only)
+        for pool in COUNTED_POOLS
+            _applies(pool.name, exclude, only) || continue
+            _hard_limit(pool.name, limits) <= budget || return false
+        end
+        for pool in GUARDED_POOLS
+            _applies(pool.name, exclude, only) || continue
+            _hard_limit(pool.name, limits) <= budget || return false
+        end
+        true
     end
-end
-
-function _covers(pools, limits, budget::Int, exclude::Tuple, only)
-    for pool in pools
-        _applies(pool.name, exclude, only) || continue
-        _hard_limit(pool.name, limits) <= budget || return false
-    end
-    return true
 end
 
 # The count every counted pool is applied at right now, `COUNTED_POOLS`-aligned. Only called
