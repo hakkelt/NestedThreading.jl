@@ -30,6 +30,13 @@ restriction that applies to that pool (see `exclude`/`only` below), so
   `with_thread_budget(f, 8)` inside an outer `with_thread_budget(g, 1)` still runs at 1;
 * concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted on
   the first entry and restored on the last exit.
+* a limit nested in an enclosing one -- on the same task, or on a task spawned inside it,
+  such as a [`@budgeted_threads`](@ref) worker -- that already holds every pool it covers at
+  or below `n` is not entered: it could change nothing, so `f()` runs directly, without the
+  lock round trip and pool updates that make a scope cost microseconds. A scope open on an
+  unrelated task never counts. This relies on the enclosing scope outliving `f()`, which a
+  task spawned inside a scope and never waited for does not guarantee. Julia 1.11 and later
+  only; on 1.10 every scope is entered.
 
 By default a restriction applies to every registered pool, [`CountedPool`](@ref)s and
 [`GuardedPool`](@ref)s alike. Two keywords narrow that:
@@ -102,9 +109,17 @@ function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where
     # are lexical wrappers and so are decided here, once, and never revised — see the
     # docstring for what that costs. Counted pools go on tracking the live minimum through
     # `_enter!`/`_exit!` for as long as the scope is open.
+    # A limit an enclosing scope already enforces could change nothing; see `_limit_in_force`.
+    kind === :limit && _limit_in_force(budget, exclude, only) && return f()
     id, guarded_targets = _enter!(budget, exclude, only, kind)
     return try
-        _run_guarded(f, guarded_targets, 1)
+        if kind === :limit
+            _with_enclosing_limit(ActiveRestriction(id, budget, exclude, only, kind)) do
+                _run_guarded(f, guarded_targets, 1)
+            end
+        else
+            _run_guarded(f, guarded_targets, 1)
+        end
     finally
         _exit!(id)
     end

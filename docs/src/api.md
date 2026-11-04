@@ -21,6 +21,7 @@ enable_full_threading
 NestedThreading.with_thread_budget
 NestedThreading.with_thread_default
 NestedThreading.with_thread_grant
+thread_limit
 ```
 
 ## Registry
