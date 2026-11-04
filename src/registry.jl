@@ -551,17 +551,8 @@ on a guard acting for the whole process while it is held (see [`GuardedPool`](@r
 function _limit_in_force(budget::Int, exclude::Tuple, only)
     limits = _enclosing_limits()
     isempty(limits) && return false
-    return @lock REGISTRY_LOCK begin
-        for pool in COUNTED_POOLS
-            _applies(pool.name, exclude, only) || continue
-            _hard_limit(pool.name, limits) <= budget || return false
-        end
-        for pool in GUARDED_POOLS
-            _applies(pool.name, exclude, only) || continue
-            _hard_limit(pool.name, limits) <= budget || return false
-        end
-        true
-    end
+    held(pool) = !_applies(pool.name, exclude, only) || _hard_limit(pool.name, limits) <= budget
+    return @lock REGISTRY_LOCK all(held, COUNTED_POOLS) && all(held, GUARDED_POOLS)
 end
 
 # The count every counted pool is applied at right now, `COUNTED_POOLS`-aligned. Only called
