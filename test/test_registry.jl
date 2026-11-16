@@ -1,3 +1,17 @@
+@testitem "public names" tags = [:registry] begin
+    using NestedThreading
+    if VERSION >= v"1.11"
+        for name in (
+                :with_thread_budget, :with_thread_default, :with_thread_grant,
+                :register_counted_pool!, :register_guarded_pool!, :register_quiesce_pool!,
+                :register_park_hook!, :CountedPool, :GuardedPool, :QuiescePool, :ParkHook,
+                :park_openblas, :capacity, :budget_for,
+            )
+            @test Base.ispublic(NestedThreading, name)
+        end
+    end
+end
+
 @testitem "pool registration" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading

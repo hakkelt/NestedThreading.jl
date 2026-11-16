@@ -27,6 +27,18 @@ export @budgeted, @budgeted_threads, @budgeted_batch,
     with_restricted_threads, with_full_threads, enable_full_threading,
     quiesce_foreign_pools, thread_limit
 
+@static if VERSION >= v"1.11"
+    eval(
+        Expr(
+            :public,
+            :with_thread_budget, :with_thread_default, :with_thread_grant,
+            :register_counted_pool!, :register_guarded_pool!, :register_quiesce_pool!,
+            :register_park_hook!, :CountedPool, :GuardedPool, :QuiescePool, :ParkHook,
+            :park_openblas, :capacity, :budget_for,
+        )
+    )
+end
+
 include("registry.jl")
 include("scopes.jl")
 include("macros.jl")
