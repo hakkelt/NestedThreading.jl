@@ -63,6 +63,21 @@ concurrency is happening somewhere else.
 [`@budgeted_batch`](@ref) is the same thing for `Polyester.@batch`. The calling module needs
 `import Polyester`, since the expansion emits `Polyester.@batch`.
 
+### Options of the emitted loop
+
+Both macros pass every argument before the loop other than `threads =` to the macro they
+emit, so a `Threads.@threads` schedule or `@batch` options combine with the switch:
+
+```julia
+@budgeted_threads :static threads = op.threaded for i in eachindex(op.batch_indices)
+    ...
+end
+
+@budgeted_batch minbatch = 64 threads = op.threaded for i in eachindex(op.batch_indices)
+    ...
+end
+```
+
 ### Loops that are not `for` loops
 
 `@sync`/`@spawn` blocks, or a single call gated on a flag, use the function forms:

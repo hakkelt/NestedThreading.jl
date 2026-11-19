@@ -40,8 +40,8 @@ runtime, and applied around the loop as a thread limit — once per loop, not on
 
 | Function / macro | Purpose |
 | --- | --- |
-| `@budgeted_threads [threads=…] for …` | `Threads.@threads` with an automatic inner budget and an on/off switch |
-| `@budgeted_batch [threads=…] for …` | the same for Polyester's `@batch` |
+| `@budgeted_threads [schedule] [threads=…] for …` | `Threads.@threads` with an automatic inner budget and an on/off switch |
+| `@budgeted_batch [options…] [threads=…] for …` | the same for Polyester's `@batch`, passing its options through |
 | `@budgeted <loop-macro> for …` | budget a loop construct you want emitted exactly as written |
 | `with_threads_disabled(f)` | limit everything to one thread for the duration of `f()` — for call sites that are not loops |
 | `with_threads_enabled(f)` | request every thread, turning on libraries that default to off (still clamped by any outer limit) |

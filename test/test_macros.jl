@@ -114,6 +114,62 @@ end
     @test expand("@budgeted_threads threads = f() for i in 1:2; nothing; end") isa Expr
 end
 
+@testitem "loop macros forward the options of the macro they emit" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    import Polyester
+    Probe.reset!()
+
+    expand(str) = macroexpand(@__MODULE__, Meta.parse(str); recursive = false)
+    contains_arg(ex, arg) = ex == arg || (ex isa Expr && any(a -> contains_arg(a, arg), ex.args))
+
+    # The schedule reaches `Threads.@threads`, the options reach `@batch`, in either order
+    # relative to the `threads =` switch, and the switch itself is not forwarded.
+    ex = expand("@budgeted_threads :static threads = flag for i in 1:2; nothing; end")
+    @test contains_arg(ex, QuoteNode(:static))
+    @test !contains_arg(ex, :(threads = flag))
+    ex = expand("@budgeted_batch threads = flag minbatch = 64 per = core for i in 1:2; nothing; end")
+    @test contains_arg(ex, :(minbatch = 64)) && contains_arg(ex, :(per = core))
+    @test !contains_arg(ex, :(threads = flag))
+
+    for flag in (true, false)
+        out = zeros(Int, 8)
+        tids = zeros(Int, 8)
+        @budgeted_threads :static threads = flag for i in 1:8
+            out[i] = Probe.VALUE[]
+            tids[i] = Threads.threadid()
+        end
+        @test all(==(flag ? max(1, NestedThreading.capacity() ÷ 8) : 1), out)
+        flag || @test length(unique(tids)) == 1
+
+        # `minbatch` above the trip count keeps `@batch` on the calling thread.
+        out = zeros(Int, 8)
+        tids = zeros(Int, 8)
+        @budgeted_batch minbatch = 1000 threads = flag for i in 1:8
+            out[i] = i
+            tids[i] = Threads.threadid()
+        end
+        @test out == 1:8
+        @test length(unique(tids)) == 1
+    end
+    if NestedThreading.capacity() > 1
+        tids = zeros(Int, 64 * NestedThreading.capacity())
+        @budgeted_batch per = thread for i in eachindex(tids)
+            tids[i] = Threads.threadid()
+        end
+        @test length(unique(tids)) > 1
+    end
+    @test Probe.VALUE[] == 16
+
+    # An option the emitted macro does not know is rejected by it, at expansion.
+    full(str) = macroexpand(@__MODULE__, Meta.parse(str))
+    @test_throws Exception full("@budgeted_threads :nonsense for i in 1:2; nothing; end")
+    @test_throws Exception full("@budgeted_threads thread = true for i in 1:2; nothing; end")
+    # The loop comes last.
+    @test_throws "expects the loop last" expand(
+        "@budgeted_threads for i in 1:2; nothing; end :static"
+    )
+end
+
 @testitem "a chain that already parallelizes is rejected" tags = [:macros] begin
     using NestedThreading
     import Polyester
