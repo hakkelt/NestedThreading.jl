@@ -3,6 +3,7 @@
 [![Tests](https://github.com/hakkelt/NestedThreading.jl/actions/workflows/tests.yml/badge.svg)](https://github.com/hakkelt/NestedThreading.jl/actions/workflows/tests.yml)
 [![Docs (dev)](https://img.shields.io/badge/docs-dev-blue.svg)](https://hakkelt.github.io/NestedThreading.jl/dev/)
 [![codecov](https://codecov.io/gh/hakkelt/NestedThreading.jl/branch/master/graph/badge.svg)](https://codecov.io/gh/hakkelt/NestedThreading.jl)
+[![Aqua QA](https://juliatesting.github.io/Aqua.jl/dev/assets/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 
 > **Disclaimer:** this package was written mostly by Claude (Anthropic's coding assistant),
 > under human direction and review. The design decisions, benchmark numbers and
