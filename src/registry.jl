@@ -302,6 +302,70 @@ workers stay parked.
     return nothing
 end
 
+# --- introspection ---------------------------------------------------------------------
+
+const PoolInfo = NamedTuple{
+    (
+        :name, :has_count, :has_guard, :has_quiesce, :has_park, :current, :unrestricted,
+        :effective,
+    ),
+    Tuple{Symbol,Bool,Bool,Bool,Bool,Union{Int,Nothing},Union{Int,Nothing},Union{Int,Nothing}},
+}
+
+"""
+    thread_pool_info() -> Vector
+
+Describe every registered library, in registration order, as one `NamedTuple` each:
+
+* `name::Symbol`: the name it was registered under (see [`register_pool!`](@ref)).
+* `has_count`, `has_guard`, `has_quiesce`, `has_park`: which controls it registered
+  (`get`/`set`, `guard`, `quiesce`, `park`).
+* `current`: its thread count right now, as its `get()` reports it.
+* `unrestricted`: the count it returns to when no scope is open: the snapshot taken when
+  the first open scope entered, or `current` when none is open.
+* `effective`: the count the open scopes apply to it, or `current` when none is open.
+
+The three counts are `nothing` for a library without `get`/`set`. The result is a snapshot
+taken under the registry lock; it does not change as scopes open and close.
+
+```julia
+# The thread count of every library that has one, right now:
+[p.name => p.current for p in thread_pool_info() if p.has_count]
+```
+"""
+function thread_pool_info()
+    return @lock REGISTRY_LOCK begin
+        info = PoolInfo[]
+        for name in POOL_NAMES
+            i = findfirst(p -> p.name === name, COUNTED_POOLS)
+            current = unrestricted = effective = nothing
+            has_park = false
+            if i !== nothing
+                pool = COUNTED_POOLS[i]
+                current = Int(pool.get())::Int
+                has_park = pool.park !== nothing
+                if isempty(ACTIVE)
+                    unrestricted = effective = current
+                else
+                    unrestricted = SAVED[i]
+                    effective = _effective_budget(name, SAVED[i])
+                end
+            end
+            push!(
+                info,
+                PoolInfo(
+                    (
+                        name, i !== nothing, any(p -> p.name === name, GUARDED_POOLS),
+                        any(p -> p.name === name, QUIESCE_POOLS), has_park, current,
+                        unrestricted, effective,
+                    )
+                ),
+            )
+        end
+        info
+    end
+end
+
 # --- counted-pool state transitions ---------------------------------------------------
 #
 # All of these run with REGISTRY_LOCK held.

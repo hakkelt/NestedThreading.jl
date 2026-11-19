@@ -45,6 +45,7 @@ end
     @test_call NT.with_threads_enabled(f)
     @test_call NT.reset_thread_counts!()
     @test_call NT.register_pool!(:jet_probe; get = () -> 1, set = identity)
+    @test_call NT.thread_pool_info()
 end
 
 @testitem "JET: macro expansions" tags = [:jet] begin

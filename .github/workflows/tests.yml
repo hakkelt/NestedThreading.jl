@@ -91,10 +91,9 @@ jobs:
             Pkg.instantiate()
             using NestedThreading, LinearAlgebra
             NT = NestedThreading
-            @assert [p.name for p in NT.COUNTED_POOLS] == [:blas]
-            @assert isempty(NT.GUARDED_POOLS)
+            @assert [p.name for p in thread_pool_info()] == [:blas]
             @assert Base.get_extension(NestedThreading, :NestedThreadingFFTWExt) === nothing
-            @assert Base.get_extension(NestedThreading, :NestedThreadingPolyesterExt) === nothing
+            @assert Base.get_extension(NestedThreading, :NestedThreadingPolyesterWeaveExt) === nothing
             original = BLAS.get_num_threads()
             NT.with_threads_disabled() do
                 @assert BLAS.get_num_threads() == 1
@@ -131,7 +130,7 @@ jobs:
             using NestedThreading, MKL
             NT = NestedThreading
             @assert Base.get_extension(NestedThreading, :NestedThreadingMKLExt) !== nothing
-            @assert :mkl in [p.name for p in NT.COUNTED_POOLS]
+            @assert any(p -> p.name === :mkl && p.has_count, thread_pool_info())
             original = MKL.get_num_threads()
             NT.with_thread_limit(2) do
                 @assert MKL.get_num_threads() == 2

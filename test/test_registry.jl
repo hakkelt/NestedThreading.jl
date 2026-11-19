@@ -18,7 +18,7 @@
         [
             :NestedThreading, Symbol("@budgeted"), Symbol("@budgeted_threads"),
             Symbol("@budgeted_batch"), :with_threads_disabled, :with_threads_enabled,
-            :with_thread_limit, :with_thread_default, :with_thread_grant,
+            :with_thread_limit, :with_thread_default, :with_thread_grant, :thread_pool_info,
         ]
     )
 end
@@ -63,6 +63,42 @@ end
     )
     @test state() == before
     @test !(:bad_probe in NT.POOL_NAMES)
+end
+
+@testitem "thread_pool_info describes the registry" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, LinearAlgebra
+    const NT = NestedThreading
+    Probe.reset!()
+
+    info = thread_pool_info()
+    @test info isa Vector{<:NamedTuple}
+    @test [p.name for p in info] == NT.POOL_NAMES
+    byname(name, info = thread_pool_info()) = only(filter(p -> p.name === name, info))
+
+    blas = byname(:blas, info)
+    @test (blas.has_count, blas.has_guard, blas.has_quiesce, blas.has_park) ==
+        (true, false, false, true)
+    @test blas.current == blas.unrestricted == blas.effective == BLAS.get_num_threads()
+
+    probe = byname(:probe, info)
+    @test (probe.has_count, probe.has_guard, probe.has_quiesce, probe.has_park) ==
+        (true, false, false, true)
+    @test probe.current == probe.unrestricted == probe.effective == 16
+
+    guard = byname(:probe_guard, info)
+    @test (guard.has_count, guard.has_guard, guard.has_quiesce, guard.has_park) ==
+        (false, true, false, false)
+    @test guard.current === guard.unrestricted === guard.effective === nothing
+    @test byname(:probe_quiesce, info).has_quiesce
+
+    # Inside a scope: `current` and `effective` follow the limit, `unrestricted` is the
+    # value the last scope restores.
+    with_thread_limit(3; only = (:probe,)) do
+        probe = byname(:probe)
+        @test (probe.current, probe.unrestricted, probe.effective) == (3, 16, 3)
+        @test byname(:blas).effective == BLAS.get_num_threads()
+    end
+    @test byname(:probe).current == 16
 end
 
 @testitem "quiesce_foreign_pools calls every registered hook once" tags = [:registry] setup = [Probe] begin

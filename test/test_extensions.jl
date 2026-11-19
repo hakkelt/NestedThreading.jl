@@ -5,8 +5,8 @@
     const NT = NestedThreading
 
     ext(name) = Base.get_extension(NestedThreading, name)
-    counted = [p.name for p in NT.COUNTED_POOLS]
-    guarded = [p.name for p in NT.GUARDED_POOLS]
+    counted = [p.name for p in thread_pool_info() if p.has_count]
+    guarded = [p.name for p in thread_pool_info() if p.has_guard]
 
     @test ext(:NestedThreadingFFTWExt) !== nothing
     @test :fftw in counted
@@ -200,7 +200,7 @@ end
     using NestedThreading, LoopVectorization
     print(Base.get_extension(NestedThreading, :NestedThreadingPolyesterWeaveExt) !== nothing,
           " ", !any(id -> id.name == "Polyester", keys(Base.loaded_modules)),
-          " ", :polyester in [p.name for p in NestedThreading.GUARDED_POOLS])
+          " ", any(p -> p.name === :polyester && p.has_guard, thread_pool_info()))
     """
     cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
     @test read(cmd, String) == "true true true"

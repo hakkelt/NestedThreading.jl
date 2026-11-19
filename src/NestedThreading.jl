@@ -25,7 +25,7 @@ using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
     with_threads_disabled, with_threads_enabled, with_thread_limit,
-    with_thread_default, with_thread_grant
+    with_thread_default, with_thread_grant, thread_pool_info
 
 @static if VERSION >= v"1.11"
     eval(
