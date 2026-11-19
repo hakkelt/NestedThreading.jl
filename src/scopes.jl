@@ -46,6 +46,10 @@ By default a restriction applies to every registered pool, thread counts and gua
   needs: "restrict exactly these pools" is not expressible as a denylist without enumerating every
   other pool, which breaks whenever a new one registers.
 
+Each takes a single pool name or a collection of them: `exclude = :polyester`,
+`only = (:blas, :mkl)` and `only = [:blas, :mkl]` all work. An element that is not a
+`Symbol` throws an `ArgumentError`.
+
 Guards are invoked only when the limit applying to them is below
 [`capacity`](@ref), and receive that limit. Polyester's guard switches it off outright
 rather than limiting it proportionally — a partial limit was tried and measured far worse
@@ -90,12 +94,14 @@ in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref)
 See also [`with_threads_disabled`](@ref), [`with_threads_enabled`](@ref).
 """
 function with_thread_limit(
-    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+    f::F, n::Integer; exclude = (), only = nothing
 ) where {F}
     return _with_scope(f, n, exclude, only, :limit)
 end
 
-function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where {F}
+function _with_scope(f::F, n::Integer, exclude, only, kind::Symbol) where {F}
+    exclude = _pool_names(exclude)
+    only = only === nothing ? nothing : _pool_names(only)
     budget = max(1, Int(n))
     n < 1 && @debug "Thread count $n raised to 1."
     (isempty(exclude) && only === nothing) || _debug_unknown_names(exclude, only)
@@ -120,6 +126,21 @@ function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where
     finally
         _exit!(id)
     end
+end
+
+# `exclude`/`only` as the `Tuple` of names the registry stores. A tuple of symbols passes
+# through unchanged, so the common call allocates nothing here.
+_pool_names(names::Tuple{Vararg{Symbol}}) = names
+_pool_names(name::Symbol) = (name,)
+function _pool_names(names)
+    for name in names
+        name isa Symbol || throw(
+            ArgumentError(
+                "pool names in `exclude`/`only` must be `Symbol`s, got $(repr(name))"
+            )
+        )
+    end
+    return Tuple(names)::Tuple{Vararg{Symbol}}
 end
 
 """
@@ -153,7 +174,7 @@ end
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_default(
-    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+    f::F, n::Integer; exclude = (), only = nothing
 ) where {F}
     return _with_scope(f, n, exclude, only, :default)
 end
@@ -183,7 +204,7 @@ the registry either way.
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_grant(
-    f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
+    f::F, n::Integer; exclude = (), only = nothing
 ) where {F}
     return _with_scope(f, n, exclude, only, :grant)
 end
@@ -195,7 +216,7 @@ Run `f()` with every registered threaded library limited to a single thread. Equ
 `with_thread_limit(f, 1)`. Use at call sites that are not a plain `for` loop — a
 `@sync`/`@spawn` block, or a single call gated on a `Bool` field.
 """
-with_threads_disabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+with_threads_disabled(f::F; exclude = (), only = nothing) where {F} =
     with_thread_limit(f, 1; exclude, only)
 
 """
@@ -211,7 +232,7 @@ site with an explicit `threaded = true` switch needs. Equivalent to
 Still clamped by any outer restriction, so calling it inside a saturated batch loop is
 safe and does nothing.
 """
-with_threads_enabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+with_threads_enabled(f::F; exclude = (), only = nothing) where {F} =
     with_thread_limit(f, capacity(); exclude, only)
 
 """

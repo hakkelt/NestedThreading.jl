@@ -338,6 +338,59 @@ end
     Probe.reset!()
 end
 
+@testitem "exclude and only take a name or any collection of names" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+
+    # Every spelling of the same set of names restricts exactly the same pools.
+    observe(; kw...) = NT.with_thread_limit(1; kw...) do
+        (Probe.VALUE[], Probe.guarded())
+    end
+    for (tuple, others) in (
+            ((:probe,), (:probe, [:probe], Set([:probe]))),
+            ((:probe, :probe_guard), ([:probe, :probe_guard], (n for n in (:probe, :probe_guard)))),
+        )
+        for key in (:exclude, :only)
+            Probe.reset!()
+            expected = observe(; key => tuple)
+            for names in others
+                Probe.reset!()
+                @test observe(; key => names) == expected
+            end
+        end
+    end
+    Probe.reset!()
+    @test observe(; exclude = :probe)[1] == 16
+    Probe.reset!()
+    @test observe(; only = :probe) == (1, false)
+    Probe.reset!()
+
+    # `exclude` and `only` combine: the allowlist minus the denylist.
+    @test observe(; only = [:probe, :probe_guard], exclude = :probe_guard) == (1, false)
+    Probe.reset!()
+
+    # A name that is not a `Symbol` is a programming error, not a pool to skip quietly.
+    msg = "pool names in `exclude`/`only` must be `Symbol`s"
+    @test_throws msg NT.with_thread_limit(() -> nothing, 1; exclude = ["probe"])
+    @test_throws msg NT.with_threads_disabled(() -> nothing; only = ("probe",))
+    @test_throws ArgumentError NT.with_thread_default(() -> nothing, 1; exclude = [1])
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
+
+    # Every scope function accepts the widened forms.
+    for scope in (
+            f -> NT.with_thread_limit(f, 1; only = :probe),
+            f -> NT.with_thread_default(f, 1; only = [:probe]),
+            f -> NT.with_threads_disabled(f; only = Set([:probe])),
+        )
+        Probe.reset!()
+        @test scope(() -> Probe.VALUE[]) == 1
+    end
+    Probe.reset!()
+    @test NT.with_thread_grant(() -> :ok, 1; exclude = :probe) === :ok
+    @test NT.with_threads_enabled(() -> Probe.VALUE[]; exclude = [:probe]) == 16
+end
+
 @testitem "a full budget raises past a hand-set count" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading

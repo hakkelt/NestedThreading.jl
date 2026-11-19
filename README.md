@@ -81,7 +81,8 @@ end
 `exclude` is a denylist (a name that is not currently registered is simply ignored, not an
 error — a caller may exclude a pool whose package is not loaded in this session); `only` is
 an allowlist and is the way to say "restrict exactly these pools, leave the rest alone"
-without having to enumerate every other pool.
+without having to enumerate every other pool. Both take a single name or any collection of
+names: `exclude = :polyester`, `only = (:blas, :mkl)` and `only = [:blas, :mkl]` all work.
 
 ## Supported libraries
 
