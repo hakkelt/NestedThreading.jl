@@ -61,7 +61,7 @@ it applies to.
 
 `kind` says how the entry combines with the others that apply to the same pool:
 
-* `:limit` — a hard limit, from [`with_thread_budget`](@ref). Nothing nested inside it can
+* `:limit` — a hard limit, from [`with_thread_limit`](@ref). Nothing nested inside it can
   exceed it.
 * `:default` — a soft default, from [`with_thread_default`](@ref): the count to run at
   unless a grant says otherwise.
@@ -203,7 +203,7 @@ leave that spin behind after every factorization.
 `park` is called after the count has already been lowered, with the registry lock held: no
 grant can open and start using the workers while they are being released. It must therefore
 not wait on another task that opens a scope. It is not called when a plain
-[`with_thread_budget`](@ref) or [`with_thread_default`](@ref) scope closes: those lower
+[`with_thread_limit`](@ref) or [`with_thread_default`](@ref) scope closes: those lower
 nothing that was not lowered before they opened.
 
 It is not called either while a hard limit strictly between 1 and [`capacity`](@ref) is
@@ -344,7 +344,7 @@ and `default`, its pre-scope, unrestricted value:
 
 1. With a soft default open, the lowest soft default.
 2. Otherwise, with a hard limit open, the lowest hard limit (which may exceed `default`:
-   that is how [`with_full_threads`](@ref) turns a default-off library on).
+   that is how [`with_threads_enabled`](@ref) turns a default-off library on).
 3. Otherwise `default`.
 
 With a grant open, that is raised to the highest grant, but never past `default`: a grant
@@ -482,25 +482,28 @@ else
 end
 
 """
-    thread_limit(name::Symbol) -> Int
+    thread_limit(name::Symbol) -> Union{Int,Nothing}
 
 The hard limit the scopes enclosing the calling task put on pool `name`: the smallest `n`
-among the [`with_thread_budget`](@ref) scopes (and so [`with_restricted_threads`](@ref), a
+among the [`with_thread_limit`](@ref) scopes (and so [`with_threads_disabled`](@ref), a
 limit of 1) that apply to it and that this task runs inside -- opened by it, or by a task it
-was spawned from while the scope was open -- or `typemax(Int)` when there is none. A scope
+was spawned from while the scope was open -- or `nothing` when there is none. A scope
 open on an unrelated task does not count: it may close at any moment.
 
 Soft defaults ([`with_thread_default`](@ref)) and grants ([`with_thread_grant`](@ref)) are not
 counted, since neither bounds the count. The name does not have to be registered.
 
-`with_thread_budget` already uses this to skip a nested limit that could change nothing, so a
+`with_thread_limit` already uses this to skip a nested limit that could change nothing, so a
 caller needs it only to ask about one pool in particular -- to skip a scope where a limit on
 that pool alone is in force, say.
 
 On Julia 1.10, which has no `ScopedValue`, enclosing scopes are not tracked and this always
-returns `typemax(Int)`: a caller that acts on it then enters its scope, as it would anyway.
+returns `nothing`: a caller that acts on it then enters its scope, as it would anyway.
 """
-thread_limit(name::Symbol) = _hard_limit(name, _enclosing_limits())
+function thread_limit(name::Symbol)
+    limit = _hard_limit(name, _enclosing_limits())
+    return limit == typemax(Int) ? nothing : limit
+end
 
 function _hard_limit(name::Symbol, limits::Vector{ActiveRestriction})
     limit = typemax(Int)
@@ -520,7 +523,7 @@ limit applies to at or below `budget`.
 
 Such a limit changes no pool's effective budget -- soft defaults and grants are clamped by
 the enclosing hard limits, which the new one could only repeat -- and its guards would only
-repeat the ones the enclosing scope already holds, so [`with_thread_budget`](@ref) runs its
+repeat the ones the enclosing scope already holds, so [`with_thread_limit`](@ref) runs its
 body without entering it. That is the nested serial call inside a saturated
 [`@budgeted_threads`](@ref) loop: entering would take the registry lock, set every counted
 pool on the way in and out, and run every guard.

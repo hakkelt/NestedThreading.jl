@@ -104,7 +104,7 @@ function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity
     return quote
         let $rangevar = $range,
                 $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
-            $(GlobalRef(NestedThreading, :with_thread_budget))(
+            $(GlobalRef(NestedThreading, :with_thread_limit))(
                 $budgetvar; exclude = $exclude
             ) do
                 $quiesce
@@ -129,7 +129,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
         let $rangevar = $range
             if $cond
                 let $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
-                    $(GlobalRef(NestedThreading, :with_thread_budget))(
+                    $(GlobalRef(NestedThreading, :with_thread_limit))(
                         $budgetvar; exclude = $exclude
                     ) do
                         $quiesce
@@ -137,7 +137,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
                     end
                 end
             else
-                $(GlobalRef(NestedThreading, :with_restricted_threads))() do
+                $(GlobalRef(NestedThreading, :with_threads_disabled))() do
                     $sequential
                 end
             end

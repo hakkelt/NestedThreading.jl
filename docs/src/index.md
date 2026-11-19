@@ -68,16 +68,16 @@ concurrency is happening somewhere else.
 `@sync`/`@spawn` blocks, or a single call gated on a flag, use the function forms:
 
 ```julia
-with_restricted_threads() do
+with_threads_disabled() do
     @sync for idx in indices
         Threads.@spawn work(idx)
     end
 end
 
-op.threaded ? with_full_threads(() -> f(x)) : with_restricted_threads(() -> f(x))
+op.threaded ? with_threads_enabled(() -> f(x)) : with_threads_disabled(() -> f(x))
 ```
 
-[`with_full_threads`](@ref) actively *enables* libraries that default to off (NFFT), and is
+[`with_threads_enabled`](@ref) actively *enables* libraries that default to off (NFFT), and is
 still clamped by any outer restriction, so it is safe to call from inside a batch loop.
 
 ## Supported libraries

@@ -40,10 +40,10 @@ end
     const NT = NestedThreading
 
     f() = 1 + 1
-    @test_call NT.with_thread_budget(f, 2)
-    @test_call NT.with_restricted_threads(f)
-    @test_call NT.with_full_threads(f)
-    @test_call NT.enable_full_threading()
+    @test_call NT.with_thread_limit(f, 2)
+    @test_call NT.with_threads_disabled(f)
+    @test_call NT.with_threads_enabled(f)
+    @test_call NT.reset_thread_counts!()
     @test_call NT.register_pool!(:jet_probe; get = () -> 1, set = identity)
 end
 

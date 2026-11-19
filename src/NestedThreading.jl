@@ -7,7 +7,7 @@ inner threading — Julia's answer to Python's `threadpoolctl`.
 
 The entry points are [`@budgeted_threads`](@ref) / [`@budgeted_batch`](@ref) for loops,
 [`@budgeted`](@ref) for a loop construct you want to keep exactly as written, and
-[`with_restricted_threads`](@ref) / [`with_full_threads`](@ref) for call sites that are not
+[`with_threads_disabled`](@ref) / [`with_threads_enabled`](@ref) for call sites that are not
 loops. Libraries register themselves through package extensions; see
 [`register_pool!`](@ref) to add one this package does not ship.
 
@@ -24,15 +24,15 @@ using Libdl: Libdl
 using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
-    with_restricted_threads, with_full_threads, enable_full_threading,
-    quiesce_foreign_pools, thread_limit
+    with_threads_disabled, with_threads_enabled, with_thread_limit,
+    with_thread_default, with_thread_grant
 
 @static if VERSION >= v"1.11"
     eval(
         Expr(
             :public,
-            :with_thread_budget, :with_thread_default, :with_thread_grant,
-            :register_pool!, :capacity, :budget_for,
+            :register_pool!, :capacity, :thread_limit, :quiesce_foreign_pools,
+            :reset_thread_counts!,
         )
     )
 end

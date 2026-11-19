@@ -16,7 +16,7 @@ import NFFT
 # throttle" are the same number: with a bare `capacity()` the getter maps `false` to 1 and
 # the setter maps 1 back to `true`, and every budget scope would silently flip a user's
 # `NFFT._use_threads[] = false` to `true` and never restore it. Clamping to 2 keeps
-# get/set a faithful round trip at every thread count. The cost is that `with_full_threads`
+# get/set a faithful round trip at every thread count. The cost is that `with_threads_enabled`
 # does not enable NFFT in a single-threaded session — where its threaded path has no
 # workers to use anyway.
 _full() = max(2, NestedThreading.capacity())

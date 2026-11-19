@@ -250,7 +250,7 @@ end
             end
         end
     budget_no_guard!(out, data, reps) =
-        NestedThreading.with_thread_budget(1; exclude = (:polyester,)) do
+        NestedThreading.with_thread_limit(1; exclude = (:polyester,)) do
             Threads.@threads for j in eachindex(data)
                 out[j] = serial_kern(data[j], reps)
             end

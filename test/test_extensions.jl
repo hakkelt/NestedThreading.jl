@@ -28,7 +28,7 @@ end
     const NT = NestedThreading
 
     original = FFTW.get_num_threads()
-    NT.with_thread_budget(2) do
+    NT.with_thread_limit(2) do
         @test FFTW.get_num_threads() == 2
     end
     @test FFTW.get_num_threads() == original
@@ -40,16 +40,16 @@ end
     const NT = NestedThreading
 
     original = Strided.get_num_threads()
-    NT.with_restricted_threads() do
+    NT.with_threads_disabled() do
         @test Strided.get_num_threads() == 1
     end
     @test Strided.get_num_threads() == original
-    NT.with_thread_budget(2) do
+    NT.with_thread_limit(2) do
         @test Strided.get_num_threads() == min(2, Threads.nthreads())
     end
     @test Strided.get_num_threads() == original
     # A budget above Julia's thread count is clamped, without Strided's warning.
-    @test_logs NT.with_thread_budget(Threads.nthreads() + 1) do
+    @test_logs NT.with_thread_limit(Threads.nthreads() + 1) do
         @test Strided.get_num_threads() == Threads.nthreads()
     end
     @test Strided.get_num_threads() == original
@@ -71,11 +71,11 @@ end
         # never restores it. See the extension for why the threshold is clamped to 2.
         for start in (true, false)
             NFFT._use_threads[] = start
-            NT.with_restricted_threads() do
+            NT.with_threads_disabled() do
                 @test NFFT._use_threads[] == false
             end
             @test NFFT._use_threads[] == start
-            NT.with_full_threads() do
+            NT.with_threads_enabled() do
                 nothing
             end
             @test NFFT._use_threads[] == start
@@ -85,7 +85,7 @@ end
         # an operator with `threaded = true` needs. Not in a single-threaded session, where
         # NFFT's threaded path has no workers to use.
         NFFT._use_threads[] = false
-        NT.with_full_threads() do
+        NT.with_threads_enabled() do
             @test NFFT._use_threads[] == (NT.capacity() > 1)
         end
         @test NFFT._use_threads[] == false
@@ -93,7 +93,7 @@ end
         # A partial budget is still "restricted" for a pool with no partial control.
         if NT.capacity() > 2
             NFFT._use_threads[] = true
-            NT.with_thread_budget(2) do
+            NT.with_thread_limit(2) do
                 @test NFFT._use_threads[] == false
             end
             @test NFFT._use_threads[] == true
@@ -143,7 +143,7 @@ end
         Polyester.@batch for i in eachindex(y)
             y[i] = i
         end
-        return NT.with_thread_budget(states, 2)
+        return NT.with_thread_limit(states, 2)
     end
 
     if NT.capacity() > 2
@@ -174,8 +174,8 @@ end
     end
     if NT.capacity() > 1
         @test free_workers() > 0
-        @test NT.with_thread_budget(free_workers, 1) == 0
-        @test NT.with_thread_budget(free_workers, NT.capacity() - 1) == 0
+        @test NT.with_thread_limit(free_workers, 1) == 0
+        @test NT.with_thread_limit(free_workers, NT.capacity() - 1) == 0
         @test free_workers() > 0
     end
 

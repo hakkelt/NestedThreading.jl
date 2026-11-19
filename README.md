@@ -43,12 +43,12 @@ applied around the loop — once per loop, not once per iteration.
 | `@budgeted_threads [threads=…] for …` | `Threads.@threads` with an automatic inner budget and an on/off switch |
 | `@budgeted_batch [threads=…] for …` | the same for Polyester's `@batch` |
 | `@budgeted <loop-macro> for …` | budget a loop construct you want emitted exactly as written |
-| `with_restricted_threads(f)` | limit everything to one thread for the duration of `f()` — for call sites that are not loops |
-| `with_full_threads(f)` | actively request full threading (still clamped by any outer restriction) |
-| `enable_full_threading()` | process-wide escape hatch: set the baseline back to full throttle |
+| `with_threads_disabled(f)` | limit everything to one thread for the duration of `f()` — for call sites that are not loops |
+| `with_threads_enabled(f)` | actively request full threading (still clamped by any outer restriction) |
+| `reset_thread_counts!()` | process-wide escape hatch: set the baseline back to full throttle |
 | `quiesce_foreign_pools()` | make other libraries' workers let go of Julia's threads before you open a region on them |
 
-Public but not exported: `NestedThreading.with_thread_budget(f, n)`,
+Public but not exported: `NestedThreading.with_thread_limit(f, n)`,
 `register_counted_pool!`, `register_guarded_pool!`, `register_quiesce_pool!`, `CountedPool`,
 `GuardedPool`, `QuiescePool`, `capacity`, `budget_for`.
 
@@ -58,7 +58,7 @@ workers are Julia tasks that keep spinning for a while after a `@batch` region e
 them — 5.7 µs against 219.9 µs for an empty loop on 8 threads. The loop macros above call it for
 themselves; call it directly before a hand-written `Threads.@threads` or `@spawn` region.
 
-Every scoping function (`with_thread_budget`, `with_restricted_threads`, `with_full_threads`)
+Every scoping function (`with_thread_limit`, `with_threads_disabled`, `with_threads_enabled`)
 also takes `exclude` and `only` keywords to narrow which pools a restriction applies to — a
 pool a restriction does not apply to keeps whatever value it already has, not the value the
 scope requested:
@@ -66,7 +66,7 @@ scope requested:
 ```julia
 # Restrict only BLAS/MKL to one thread, e.g. around a Krylov solve with BLAS-1 inside;
 # FFTW and everything else are left exactly as they are.
-with_restricted_threads(only = (:blas, :mkl)) do
+with_threads_disabled(only = (:blas, :mkl)) do
     cg!(x, A, b)
 end
 ```
@@ -113,7 +113,7 @@ opens, and restored when the last one closes.
 
 That gives two properties that a naive save/restore (even a locked one) does not:
 
-* **Nesting only ever narrows.** An inner `with_thread_budget(f, 8)` inside an outer
+* **Nesting only ever narrows.** An inner `with_thread_limit(f, 8)` inside an outer
   restriction to 1 still runs at 1 — it cannot widen a budget somebody else is relying on.
 * **Concurrent scopes cannot corrupt each other.** With per-scope save/restore, two tasks
   interleave as *A saves 8 → B saves 1 → A restores 8 → B restores 1* and leave the process

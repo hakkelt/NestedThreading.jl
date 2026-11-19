@@ -1,6 +1,6 @@
 # Composition rules
 
-Everything in this package reduces to [`NestedThreading.with_thread_budget`](@ref). The rules
+Everything in this package reduces to [`NestedThreading.with_thread_limit`](@ref). The rules
 below are what make it safe to use from library code that does not know what its caller is
 doing.
 
@@ -16,8 +16,8 @@ The registry keeps a multiset of every budget scope currently active anywhere in
 ## Nesting only ever narrows
 
 ```julia
-with_thread_budget(1) do
-    with_thread_budget(8) do
+with_thread_limit(1) do
+    with_thread_limit(8) do
         BLAS.get_num_threads()   # == 1
     end
 end
@@ -147,7 +147,7 @@ macros do — they wrap the loop, not the loop body.
 ## A full budget raises, it does not merely permit
 
 The applied budget is written to every counted pool unconditionally, so a scope that works
-out to [`NestedThreading.capacity`](@ref) — [`with_full_threads`](@ref), or a loop with a
+out to [`NestedThreading.capacity`](@ref) — [`with_threads_enabled`](@ref), or a loop with a
 single item — sets the pools *up* to that value, past a lower count the caller may have
 configured by hand:
 
@@ -159,7 +159,7 @@ end
 BLAS.get_num_threads()                # == 2 again
 ```
 
-This is deliberate: it is what lets [`with_full_threads`](@ref) turn a default-off library
+This is deliberate: it is what lets [`with_threads_enabled`](@ref) turn a default-off library
 such as NFFT on. The snapshot/restore applies as usual, so the hand-set value comes back
 when the scope closes — but a hand-tuned count is not honoured *inside* a full-throttle
 scope.
@@ -176,7 +176,7 @@ to it:
 
 | scope | kind | combines with its own kind by |
 | --- | --- | --- |
-| [`NestedThreading.with_thread_budget`](@ref) | hard limit | minimum |
+| [`NestedThreading.with_thread_limit`](@ref) | hard limit | minimum |
 | [`NestedThreading.with_thread_default`](@ref) | soft default | minimum |
 | [`NestedThreading.with_thread_grant`](@ref) | grant | maximum |
 
@@ -190,7 +190,7 @@ with_thread_default(1; only = (:blas,)) do
     with_thread_grant(8; only = (:blas,)) do
         BLAS.get_num_threads()                        # 8
     end
-    with_thread_budget(1) do                          # a saturated batch worker
+    with_thread_limit(1) do                          # a saturated batch worker
         with_thread_grant(8; only = (:blas,)) do
             BLAS.get_num_threads()                    # 1: a grant never beats a limit
         end

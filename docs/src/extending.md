@@ -38,7 +38,7 @@ should be off whenever anything is restricted; see [Composition rules](@ref).
     throttle" the same number — the getter maps `false` to 1 and the setter maps 1 back to
     `true`, so every budget scope silently enables a library the user had switched off and
     never restores it. `max(2, capacity())` is identical everywhere else and costs only
-    that `with_full_threads` will not enable the library on a machine with one thread,
+    that `with_threads_enabled` will not enable the library on a machine with one thread,
     where its threaded path has no workers anyway.
 
 ## Guarded pools

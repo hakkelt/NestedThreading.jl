@@ -13,7 +13,7 @@
 end
 
 """
-    with_thread_budget(f, n::Integer; exclude = (), only = nothing)
+    with_thread_limit(f, n::Integer; exclude = (), only = nothing)
 
 Run `f()` with every registered threaded library limited to `n` threads, restoring the
 previous state afterwards (also on exception). Returns `f()`'s value.
@@ -22,7 +22,7 @@ The budget actually applied to a pool is the `minimum` over every *currently-act
 restriction that applies to that pool (see `exclude`/`only` below), so
 
 * nesting can only ever narrow, never widen, an outer restriction — an inner
-  `with_thread_budget(f, 8)` inside an outer `with_thread_budget(g, 1)` still runs at 1;
+  `with_thread_limit(f, 8)` inside an outer `with_thread_limit(g, 1)` still runs at 1;
 * concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted on
   the first entry and restored on the last exit.
 * a limit nested in an enclosing one -- on the same task, or on a task spawned inside it,
@@ -69,10 +69,10 @@ in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref)
 !!! note "A budget of `capacity()` raises, it does not merely permit"
     The budget is applied to every counted pool this restriction applies to
     unconditionally, so a scope whose budget works out to [`capacity`](@ref) —
-    `with_full_threads`, or a loop with a single item — sets those pools *up* to that
+    `with_threads_enabled`, or a loop with a single item — sets those pools *up* to that
     value for its duration, even past a lower count the caller had configured
     (`BLAS.set_num_threads(2)`, say). The original counts are restored on exit like any
-    other scope. This is what makes `with_full_threads` able to turn NFFT on; if a
+    other scope. This is what makes `with_threads_enabled` able to turn NFFT on; if a
     hand-tuned lower count must be preserved, do not open a full-throttle scope around it
     — or `exclude`/`only` it out of one.
 
@@ -87,9 +87,9 @@ in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref)
     but it does mean a long-lived restricted scope throttles the whole process. This is a
     limitation of the underlying C libraries, not something this package can solve.
 
-See also [`with_restricted_threads`](@ref), [`with_full_threads`](@ref).
+See also [`with_threads_disabled`](@ref), [`with_threads_enabled`](@ref).
 """
-function with_thread_budget(
+function with_thread_limit(
     f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
 ) where {F}
     return _with_scope(f, n, exclude, only, :limit)
@@ -127,7 +127,7 @@ more. Returns `f()`'s value.
 
 This is the scope to open around a whole computation whose calls into a library are mostly
 too small to benefit from its threads, but some of which are not. A hard
-[`with_thread_budget`](@ref) cannot express that: nothing nested inside it can widen past it,
+[`with_thread_limit`](@ref) cannot express that: nothing nested inside it can widen past it,
 so the few large calls would run serial too.
 
 Soft defaults combine with each other by minimum, and yield to a grant. They do not yield to
@@ -146,7 +146,7 @@ with_thread_default(1; only = (:blas,)) do     # small BLAS calls: serial
 end
 ```
 
-See [`with_thread_budget`](@ref) for `exclude`, `only` and what is process-global.
+See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_default(
     f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
@@ -162,7 +162,7 @@ default in force ([`with_thread_default`](@ref)), for a call that is known to be
 enough to be worth threading. Returns `f()`'s value.
 
 A grant overrides soft defaults but never a hard limit: inside a
-[`with_thread_budget`](@ref)`(g, 1)` — a worker of a saturated outer parallel loop, say — a
+[`with_thread_limit`](@ref)`(g, 1)` — a worker of a saturated outer parallel loop, say — a
 grant does nothing. It also never raises a pool past the count the process runs it at when
 no scope is open: it restores threading that a soft default took away, it does not add
 threads a caller turned off by hand with, e.g., `BLAS.set_num_threads(1)`. Several grants open
@@ -177,7 +177,7 @@ several milliseconds, not around a small one. Decide whether a call is large eno
 opening one per call and letting it do nothing: opening a scope costs a lock and a pass over
 the registry either way.
 
-See [`with_thread_budget`](@ref) for `exclude`, `only` and what is process-global.
+See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_grant(
     f::F, n::Integer; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
@@ -186,17 +186,17 @@ function with_thread_grant(
 end
 
 """
-    with_restricted_threads(f; exclude = (), only = nothing)
+    with_threads_disabled(f; exclude = (), only = nothing)
 
 Run `f()` with every registered threaded library limited to a single thread. Equivalent to
-`with_thread_budget(f, 1)`. Use at call sites that are not a plain `for` loop — a
+`with_thread_limit(f, 1)`. Use at call sites that are not a plain `for` loop — a
 `@sync`/`@spawn` block, or a single call gated on a `Bool` field.
 """
-with_restricted_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
-    with_thread_budget(f, 1; exclude, only)
+with_threads_disabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+    with_thread_limit(f, 1; exclude, only)
 
 """
-    with_full_threads(f; exclude = (), only = nothing)
+    with_threads_enabled(f; exclude = (), only = nothing)
 
 Run `f()` requesting full threading: every registered thread count at [`capacity`](@ref)
 and every guarded library *enabled*. Unlike a plain unwrapped call this actively turns
@@ -206,23 +206,22 @@ with an explicit `threaded = true` switch needs.
 Still clamped by any outer restriction, so calling it inside a saturated batch loop is
 safe and does nothing.
 """
-with_full_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
-    with_thread_budget(f, capacity(); exclude, only)
+with_threads_enabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) where {F} =
+    with_thread_limit(f, capacity(); exclude, only)
 
 """
-    enable_full_threading()
+    reset_thread_counts!()
 
-Permanently set every registered thread count to its registration-time value —
+Set every registered thread count back to the value it had when its library registered,
+both now (if no scope is open) and as the value the last scope to close restores. This is
 the process-wide escape hatch for code that only ever runs one thing at a time and wants
-every library at full throttle.
+every library back at the count it started with, typically full throttle, after something
+lowered it by hand (`BLAS.set_num_threads(1)`, say).
 
-This sets the *baseline*: the value restored when the last budget scope exits. Scoped
-restrictions still win while they are active; this only changes what the process returns
-to when nothing is restricted.
-
-Not scoped and not undoable — there is deliberately no `disable_full_threading`.
+Scopes still win while they are open; this only changes what the process returns to when
+nothing is open. It is not scoped and has no inverse.
 """
-function enable_full_threading()
+function reset_thread_counts!()
     @lock REGISTRY_LOCK begin
         for i in eachindex(COUNTED_POOLS)
             SAVED[i] = MAXIMA[i]
