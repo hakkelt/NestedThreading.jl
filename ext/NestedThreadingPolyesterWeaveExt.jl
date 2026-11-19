@@ -12,7 +12,7 @@ import ThreadingUtilities
 # `disable_polyester_threads` does, by reserving every PolyesterWeave worker slot, so nested
 # `@batch` and `@tturbo` loops find none free and run serially. Reservation is
 # inherently nesting- and concurrency-safe (an atomic take from a shared mask), which is why
-# Polyester is a GuardedPool rather than a CountedPool: there is no global count to snapshot
+# Polyester registers a guard rather than a thread count: there is no global count to snapshot
 # and restore, and hence none of the interleaving hazard that would come with one.
 #
 # WHY NOT A PARTIAL LIMIT
@@ -52,8 +52,9 @@ end
 # Polyester's workers are Julia tasks that spin on a state word for ~2^20 `pause()` iterations
 # after a `@batch` region ends before parking themselves, so until then they are still
 # occupying Julia's threads and a `Threads.@threads` region opened in that window waits for
-# them rather than running on them. Parking them at once removes the wait. See `QuiescePool`
-# for the measurements and <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
+# them rather than running on them. Parking them at once removes the wait. See
+# `NestedThreading.register_pool!` for the measurements and
+# <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
 #
 # Only the workers taken from PolyesterWeave's free mask are parked, never all of them as
 # `ThreadingUtilities.sleep_all_tasks` does. That function overwrites every worker's function
@@ -104,8 +105,7 @@ function _foreach_worker(f::F, masks) where {F}
 end
 
 function __init__()
-    NestedThreading.register_guarded_pool!(_guard; name = :polyester)
-    return NestedThreading.register_quiesce_pool!(_quiesce; name = :polyester)
+    return NestedThreading.register_pool!(:polyester; guard = _guard, quiesce = _quiesce)
 end
 
 end # module NestedThreadingPolyesterWeaveExt

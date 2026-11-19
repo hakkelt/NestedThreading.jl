@@ -27,15 +27,7 @@ thread_limit
 ## Registry
 
 ```@docs
-NestedThreading.register_counted_pool!
-NestedThreading.register_guarded_pool!
-NestedThreading.register_quiesce_pool!
-NestedThreading.register_park_hook!
-NestedThreading.CountedPool
-NestedThreading.GuardedPool
-NestedThreading.QuiescePool
-NestedThreading.ParkHook
-NestedThreading.park_openblas
+NestedThreading.register_pool!
 NestedThreading.capacity
 NestedThreading.budget_for
 ```

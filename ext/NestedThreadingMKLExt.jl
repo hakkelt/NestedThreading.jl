@@ -15,7 +15,7 @@ _get() = Int(MKL.get_num_threads())
 _set(n::Int) = MKL.set_num_threads(LinearAlgebra.BlasInt(n))
 
 function __init__()
-    return NestedThreading.register_counted_pool!(_get, _set; name = :mkl)
+    return NestedThreading.register_pool!(:mkl; get = _get, set = _set)
 end
 
 end # module NestedThreadingMKLExt

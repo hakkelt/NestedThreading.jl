@@ -120,8 +120,8 @@ observable.
 
 A counted pool is a global that the registry writes on every entry and exit, so it always
 reflects the *current* minimum: if another task opens a narrower scope while yours is
-running, your BLAS and FFTW counts drop with it. A [`NestedThreading.GuardedPool`](@ref)
-has no global to write — the guard is a lexical wrapper around `f()`, and `f()` is already
+running, your BLAS and FFTW counts drop with it. A guarded pool (see
+[`NestedThreading.register_pool!`](@ref)) has no global to write — the guard is a lexical wrapper around `f()`, and `f()` is already
 running. Whether a guard was entered is therefore decided once, from the budget at entry,
 and cannot be revised.
 
@@ -198,10 +198,10 @@ with_thread_default(1; only = (:blas,)) do
 end
 ```
 
-When a grant closes and a pool's count goes down, that pool's
-[`NestedThreading.ParkHook`](@ref)s run. The one this package registers shuts OpenBLAS's
-worker threads down, which would otherwise spin for about 0.1 s on the cores the caller wants
-next; see [`NestedThreading.park_openblas`](@ref).
+When a grant closes and a pool's count goes down, that pool's `park` hook runs (see
+[`NestedThreading.register_pool!`](@ref)). The one this package registers for `:blas` shuts
+OpenBLAS's worker threads down, which would otherwise spin for about 0.1 s on the cores the
+caller wants next.
 
 ## Worked example
 

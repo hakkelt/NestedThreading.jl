@@ -92,7 +92,7 @@ end
 # A loop that is itself a `Polyester.@batch` is the Polyester pool's own region, so quiescing
 # it would only make it re-acquire its workers a line later. Every other loop here runs on
 # Julia's scheduler and must not open while a foreign pool is still spinning on its threads —
-# see `QuiescePool`.
+# see `register_pool!`.
 _quiesce_expr(exclude::Tuple) =
     :polyester in exclude ? nothing : :($(GlobalRef(NestedThreading, :quiesce_foreign_pools))())
 

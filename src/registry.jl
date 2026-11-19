@@ -1,112 +1,45 @@
 # Pool registry and the refcounted thread-budget scope stack.
 
-"""
-    CountedPool(name::Symbol, get, set)
-
-A threaded library that exposes a persistent *thread count* through a getter/setter pair,
-e.g. `BLAS.get_num_threads`/`BLAS.set_num_threads` or `FFTW.get_num_threads`/
-`FFTW.set_num_threads`.
-
-Register with [`register_counted_pool!`](@ref).
-"""
-struct CountedPool
-    name::Symbol
-    get::Function
-    set::Function
-end
-
-"""
-    GuardedPool(name::Symbol, guard)
-
-A threaded library whose only control is a *scoped* context manager, e.g. Polyester's
-`disable_polyester_threads`.
-
-`guard` must be callable as `guard(f::Function, budget::Int)` and must run `f()` with that
-library limited to `budget` threads, returning `f()`'s value. It is only ever called with
-`budget < capacity()`; an unrestricted scope skips guards entirely.
-
-Most such libraries can only be switched fully off, which is the right default: a partial
-limit was implemented for Polyester (which supports one) and measured 320x *worse* in the
-saturated regime, because at high thread counts a nested parallel loop is catastrophic
-however few workers it gets. See the PolyesterWeave extension for the numbers. `budget` is passed
-anyway so a library with a genuinely proportional control can use it.
-
-A guard must act for the whole process while it is held, not only for the calling task:
-Polyester's reserves its workers, which every task then finds taken. A hard limit nested in
-one that already covers this pool does not call the guard again (see `_limit_in_force`),
-so the enclosing scope's guard is all that restricts a nested call on another task.
-
-Unlike [`CountedPool`](@ref) this field cannot be a `FunctionWrapper`: the guard receives an
-arbitrary caller closure, whose type is not known until the call site, so one runtime
-dispatch per guarded scope is inherent. It happens once per budget scope, not once per loop
-iteration.
-
-Prefer [`CountedPool`](@ref) whenever the library exposes an imperative setter, even a
-boolean one — a counted pool goes through this package's refcounted snapshot/restore and is
-therefore safe under concurrency, whereas a guard that saves and restores a global itself
-reintroduces the very interleaving bug this package exists to fix. A boolean toggle maps
-cleanly onto a count; see the NFFT extension for the pattern. `GuardedPool` is for APIs like
-Polyester's, which are reservation-based and have no imperative form.
-
-Register with [`register_guarded_pool!`](@ref).
-"""
-struct GuardedPool
-    name::Symbol
-    guard::Function
-end
-
-"""
-    QuiescePool(name::Symbol, quiesce)
-
-A threaded library whose workers keep *occupying* Julia's threads after one of its parallel
-regions has finished, and which can be told to let go. `quiesce()` is called immediately
-before this package opens a region on Julia's own scheduler.
-
-Polyester is the case this exists for. Its workers are Julia tasks that spin on a state word
-for about 2^20 `pause()` iterations before parking, so for the whole of that window the Julia
-threads they sit on are busy. A `Threads.@threads` region opened in that window does not get
-those threads; it waits for them. Measured on an AMD EPYC 7352, 8 Julia threads, Julia 1.13.0,
-2026-09-21, with an empty loop body:
-
-    Threads.@threads, in a process that has never run a `@batch`     5.7 us
-    Threads.@threads, after one `@batch` has run                   219.9 us
-    Threads.@threads, after `@batch` + quiesce                      18.6 us
-    the quiesce call itself                                          0.1 us
-    Polyester.@batch, after a quiesce                                5.0 us
-
-A 38x penalty, removed for a tenth of a microsecond, and re-waking the workers for the next
-`@batch` costs nothing measurable. See the PolyesterWeave extension and
-<https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
-
-Unlike [`GuardedPool`](@ref) this is not scoped and takes no budget: it is a one-shot "release
-the threads now" with no paired restore, because the library re-acquires what it needs at its
-next region on its own.
-
-Register with [`register_quiesce_pool!`](@ref).
-"""
-struct QuiescePool
-    name::Symbol
-    quiesce::Function
-end
-
-# Separate concretely-typed vectors (rather than one Vector{Union{...}}) so that iteration
-# stays inference-friendly.
+# Internal records of the registered libraries, one vector per capability. A library
+# registered with several capabilities appears in several vectors under the same name.
 #
-# ON THE `::Function` FIELDS AND THEIR RUNTIME DISPATCH
-#
-# A registry that downstream packages extend at load time cannot be concretely typed: the
-# set of pools is only known at runtime, so calling `pool.get`/`pool.set`/`pool.guard` is a
-# dynamic dispatch. This is inherent, not an oversight, and the alternatives are worse:
+# The callables are stored untyped. A registry that downstream packages extend at load time
+# cannot be concretely typed: the set of pools is only known at runtime, so calling
+# `pool.get`/`pool.set`/`pool.guard` is a dynamic dispatch whatever the field type. The
+# alternatives are worse:
 #
 #   * `FunctionWrapper` fields do not remove the dispatch, they relocate it into
-#     FunctionWrappers' own `reinit_wrapper` path — which lazily mutates the stored function
+#     FunctionWrappers' own `reinit_wrapper` path -- which lazily mutates the stored function
 #     pointer, and so is not safe for a registry that is read from many threads.
 #   * A small `Union` of concrete function types would close the registry to extension,
 #     which is the whole point of the package.
 #
-# What is done instead: the dispatch is confined to the `@noinline` helpers below, so it
-# never leaks into callers' inlined code, and it costs one dispatch per *budget scope* —
-# once per `mul!` — never once per loop iteration.
+# The dispatch is confined to the `@noinline` helpers below, so it never leaks into callers'
+# inlined code, and it costs one dispatch per *budget scope* -- once per `mul!` -- never once
+# per loop iteration. Separate concretely-typed vectors (rather than one
+# `Vector{Union{...}}`) keep the iteration itself inference-friendly.
+
+# A library with a persistent thread count (`get`/`set`), and optionally a `park` hook.
+struct CountedPool
+    name::Symbol
+    get::Any
+    set::Any
+    park::Any   # `nothing` when the library registered none
+end
+
+# A library whose only control is a scoped switch, `guard(f, n)`.
+struct GuardedPool
+    name::Symbol
+    guard::Any
+end
+
+# A library whose idle workers can be told to let go of Julia's threads, `quiesce()`.
+struct QuiescePool
+    name::Symbol
+    quiesce::Any
+end
+
+const POOL_NAMES = Symbol[]   # every registered name, whatever its capabilities
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
 const QUIESCE_POOLS = QuiescePool[]
@@ -114,26 +47,6 @@ const QUIESCE_POOLS = QuiescePool[]
 # Parallel to COUNTED_POOLS:
 const MAXIMA = Int[]   # each pool's count at registration time (its "full throttle" value)
 const SAVED = Int[]    # snapshot taken on the empty -> non-empty ACTIVE transition
-
-"""
-    ParkHook(name::Symbol, park)
-
-A function that makes the [`CountedPool`](@ref) `name` release the cores its idle workers
-are still holding, called after a [`with_thread_grant`](@ref) scope that had raised that
-pool closes and lowers it again.
-
-OpenBLAS is the case this exists for. Lowering its thread count does not stop the workers
-it no longer uses: they go on spinning for `OPENBLAS_THREAD_TIMEOUT` (by default 2^28
-cycles, about 0.1 s) before they sleep, on cores the caller's own threads now want. A
-grant that raises BLAS for one factorization inside a solve that otherwise runs it serial
-would leave that spin behind after every factorization.
-
-Register with [`register_park_hook!`](@ref).
-"""
-struct ParkHook
-    name::Symbol
-    park::Function
-end
 
 """
     ActiveRestriction(id, budget, exclude, only, kind)
@@ -165,8 +78,6 @@ struct ActiveRestriction
     kind::Symbol
 end
 
-const PARK_HOOKS = ParkHook[]
-
 # Multiset of currently-active restrictions.
 const ACTIVE = ActiveRestriction[]
 const _NEXT_ACTIVE_ID = Ref(0)   # protected by REGISTRY_LOCK, like ACTIVE itself
@@ -188,124 +99,192 @@ capacity() = threadpoolsize()
 # --- registration ---------------------------------------------------------------------
 
 """
-    register_counted_pool!(get, set; name::Symbol)
+    register_pool!(name::Symbol; get = nothing, set = nothing, guard = nothing,
+                   quiesce = nothing, park = nothing)
 
-Register a library controlled by a thread-count getter/setter pair. Called from
-`NestedThreading`'s own package extensions, and available to any downstream package that
-wants to add a library this package does not ship an extension for:
+Register the threaded library `name` together with every control it offers, in one call.
+`NestedThreading`'s own package extensions use it, and so can any package that adds a
+library this package does not ship an extension for:
 
 ```julia
-NestedThreading.register_counted_pool!(MyLib.get_threads, MyLib.set_threads; name = :mylib)
+function __init__()
+    NestedThreading.register_pool!(:mylib; get = MyLib.get_threads, set = MyLib.set_threads)
+end
 ```
 
-Registering a `name` that is already present is a no-op, so duplicate extensions across
-packages are harmless.
+The keywords are the controls a library can have; pass the ones it has:
 
-Registration is expected to happen at load time (`__init__`), before any concurrent use.
-Registering while a budget scope is already open is nevertheless handled: the newcomer's
-current count becomes its restore value and the restriction in force is applied to it
-immediately, so it is restored along with everything else when the last scope exits.
+* `get`, `set`: a persistent thread count, read as `get()` and written as `set(n::Int)`, such
+  as `BLAS.get_num_threads`/`BLAS.set_num_threads`. The first scope to open snapshots the
+  count, every scope change applies the effective limit to it, and the last scope to close
+  restores the snapshot.
+* `guard`: a scoped switch, called as `guard(f, n::Int)`, that runs `f()` with the library
+  limited to `n` threads and returns `f()`'s value. See "Guards" below.
+* `quiesce`: called as `quiesce()` right before this package opens a parallel region on
+  Julia's own scheduler, to make the library's idle workers let go of Julia's threads. See
+  "Quiescing" below.
+* `park`: called as `park()` after a [`with_thread_grant`](@ref) scope closes and lowers
+  this library's count, to make the workers it no longer uses release the cores they are
+  spinning on. Needs `get`/`set`. See "Parking" below.
+
+Registration is checked strictly. It throws an `ArgumentError` for a `name` that is already
+registered, for `get` without `set` or `set` without `get`, for `park` without `get`/`set`,
+for no control at all, and when `get()` does not return an `Integer`. A failed call registers
+nothing.
+
+Registration is expected to happen at load time (`__init__`), but an extension may be loaded
+while some task has a scope open. A newly registered count then takes its current value as
+its restore value and gets the restriction in force at once, so the last scope to close
+restores it with everything else. A guard registered while a scope is open is not applied to
+that scope, only to those opened afterwards.
+
+# Extended help
+
+## Counts first
+
+Prefer `get`/`set` whenever the library has an imperative setter, even a boolean one. A
+count goes through this package's refcounted snapshot/restore and is therefore safe under
+concurrency, whereas a guard that saves and restores a global itself reintroduces the very
+interleaving bug this package exists to fix. A boolean switch maps onto a count; the NFFT
+extension shows the pattern. `guard` is for APIs like Polyester's, which are
+reservation-based and have no imperative form.
+
+## Guards
+
+A guard is only ever called with `n < capacity()`; an unrestricted scope skips guards
+entirely. Most libraries with only a scoped switch can only be switched fully off, which is
+the right default: a partial limit was implemented for Polyester (which supports one) and
+measured 320x *worse* in the saturated regime, because at high thread counts a nested
+parallel loop is catastrophic however few workers it gets. See the PolyesterWeave extension
+for the numbers. `n` is passed anyway so a library with a genuinely proportional control can
+use it.
+
+A guard must act for the whole process while it is held, not only for the calling task:
+Polyester's reserves its workers, which every task then finds taken. A hard limit nested in
+one that already covers this library does not call the guard again (see `_limit_in_force`),
+so the enclosing scope's guard is all that restricts a nested call on another task.
+
+The guard receives an arbitrary caller closure, whose type is not known until the call
+site, so one runtime dispatch per guarded scope is inherent. It happens once per scope, not
+once per loop iteration.
+
+## Quiescing
+
+Some libraries' workers keep *occupying* Julia's threads after one of their parallel regions
+has finished. Polyester is the case this exists for. Its workers are Julia tasks that spin
+on a state word for about 2^20 `pause()` iterations before parking, so for the whole of that
+window the Julia threads they sit on are busy. A `Threads.@threads` region opened in that
+window does not get those threads; it waits for them. Measured on an AMD EPYC 7352, 8 Julia
+threads, Julia 1.13.0, 2026-09-21, with an empty loop body:
+
+    Threads.@threads, in a process that has never run a `@batch`     5.7 us
+    Threads.@threads, after one `@batch` has run                   219.9 us
+    Threads.@threads, after `@batch` + quiesce                      18.6 us
+    the quiesce call itself                                          0.1 us
+    Polyester.@batch, after a quiesce                                5.0 us
+
+A 38x penalty, removed for a tenth of a microsecond, and re-waking the workers for the next
+`@batch` costs nothing measurable. See the PolyesterWeave extension and
+<https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
+
+Unlike a guard, `quiesce` is not scoped and takes no thread count: it is a one-shot "release
+the threads now" with no paired restore, because the library re-acquires what it needs at
+its next region on its own. The loop macros call every registered `quiesce` themselves,
+except around a `Polyester.@batch` loop.
+
+## Parking
+
+OpenBLAS is the case `park` exists for. Lowering its thread count does not stop the workers
+it no longer uses: they go on spinning for `OPENBLAS_THREAD_TIMEOUT` (by default 2^28
+cycles, about 0.1 s) before they sleep, on cores the caller's own threads now want. A grant
+that raises BLAS for one factorization inside a solve that otherwise runs it serial would
+leave that spin behind after every factorization.
+
+`park` is called after the count has already been lowered, with the registry lock held: no
+grant can open and start using the workers while they are being released. It must therefore
+not wait on another task that opens a scope. It is not called when a plain
+[`with_thread_budget`](@ref) or [`with_thread_default`](@ref) scope closes: those lower
+nothing that was not lowered before they opened.
+
+It is not called either while a hard limit strictly between 1 and [`capacity`](@ref) is
+open around the library. Such a limit is what [`@budgeted_threads`](@ref) opens for a loop
+with fewer items than threads, whose other workers may be inside a threaded call to the same
+library, at the count a grant raised, when this grant closes.
+
+!!! warning "Calls that bypass the scopes"
+    The lock only orders `park` against other scopes. A task that calls into the library
+    with no scope of its own, at a count a grant raised, may still be inside that call when
+    the grant closes and `park` runs. Whether that is safe is the library's business; for
+    OpenBLAS it is not, which is why its hook is skipped under a partial limit.
 """
-function register_counted_pool!(get::Function, set::Function; name::Symbol)
+function register_pool!(
+    name::Symbol; get = nothing, set = nothing, guard = nothing, quiesce = nothing,
+    park = nothing,
+)
+    _check_controls(name, get, set, guard, quiesce, park)
     @lock REGISTRY_LOCK begin
-        if !any(p -> p.name === name, COUNTED_POOLS)
-            push!(COUNTED_POOLS, CountedPool(name, get, set))
-            current = Int(get())
+        name in POOL_NAMES && throw(
+            ArgumentError(
+                "NestedThreading.register_pool!: a pool named $(repr(name)) is already " *
+                    "registered. Each library is registered once, with all its controls in " *
+                    "one call; pick another name for a different library."
+            )
+        )
+        current = 0
+        if get !== nothing
+            value = get()
+            value isa Integer || throw(
+                ArgumentError(
+                    "NestedThreading.register_pool!: `get()` of pool $(repr(name)) " *
+                        "returned $(repr(value)) of type $(typeof(value)); it must return " *
+                        "the library's current thread count as an `Integer`."
+                )
+            )
+            current = Int(value)
+        end
+        push!(POOL_NAMES, name)
+        if get !== nothing
+            push!(COUNTED_POOLS, CountedPool(name, get, set, park))
             push!(MAXIMA, current)
             # Keep SAVED aligned with COUNTED_POOLS even when registering mid-scope, and
             # apply the restriction currently in force to the newcomer.
             push!(SAVED, current)
             isempty(ACTIVE) || set(_effective_budget(name, current))
         end
+        guard === nothing || push!(GUARDED_POOLS, GuardedPool(name, guard))
+        quiesce === nothing || push!(QUIESCE_POOLS, QuiescePool(name, quiesce))
     end
     return nothing
 end
 
-"""
-    register_guarded_pool!(guard; name::Symbol)
-
-Register a library that only has a scoped on/off switch. `guard` is called as
-`guard(f, budget::Int)` and must run `f()` with that library limited to `budget` threads,
-returning `f()`'s value; see [`GuardedPool`](@ref) for the full contract.
-
-Registering a `name` that is already present is a no-op, so duplicate extensions across
-packages are harmless. Registration is expected to happen at load time (`__init__`); a
-guard registered while a budget scope is already open is not retroactively applied to it.
-"""
-function register_guarded_pool!(guard::Function; name::Symbol)
-    @lock REGISTRY_LOCK begin
-        if !any(p -> p.name === name, GUARDED_POOLS)
-            push!(GUARDED_POOLS, GuardedPool(name, guard))
-        end
-    end
-    return nothing
-end
-
-"""
-    register_quiesce_pool!(quiesce; name::Symbol)
-
-Register a library whose workers hold onto Julia's threads between its own parallel regions.
-`quiesce` is called with no arguments before this package opens a region on Julia's
-scheduler, and must make that library release them; see [`QuiescePool`](@ref) for why this
-exists and what it is worth.
-
-```julia
-NestedThreading.register_quiesce_pool!(MyLib.park_workers!; name = :mylib)
-```
-
-Registering a `name` that is already present is a no-op. Registration is expected to happen at
-load time (`__init__`).
-"""
-function register_quiesce_pool!(quiesce::Function; name::Symbol)
-    @lock REGISTRY_LOCK begin
-        if !any(p -> p.name === name, QUIESCE_POOLS)
-            push!(QUIESCE_POOLS, QuiescePool(name, quiesce))
-        end
-    end
-    return nothing
-end
-
-"""
-    register_park_hook!(park; name::Symbol)
-
-Register `park()` to be called whenever a [`with_thread_grant`](@ref) scope closes and the
-[`CountedPool`](@ref) `name` goes down as a result, so that the library can release the cores
-its now-unused workers would otherwise go on spinning on; see [`ParkHook`](@ref).
-
-`park` is called with no arguments, after the pool's count has already been lowered, with
-the registry lock held: no grant can open and start using the workers while they are being
-released. It must therefore not wait on another task that opens a budget scope. It is not
-called when a plain [`with_thread_budget`](@ref) or [`with_thread_default`](@ref) scope closes:
-those lower nothing that was not lowered before they opened.
-
-It is not called either while a hard limit strictly between 1 and [`capacity`](@ref) is open
-around the pool. Such a limit is what [`@budgeted_threads`](@ref) opens for a loop with fewer
-items than threads, whose other workers may be inside a threaded call to the same library, at
-the count a grant raised, when this grant closes.
-
-!!! warning "Calls that bypass the scopes"
-    The lock only orders the hook against other scopes. A task that calls into the library
-    with no scope of its own, at a count a grant raised, may still be inside that call when
-    the grant closes and the hook runs. Whether that is safe is the library's business; for
-    OpenBLAS it is not, see [`park_openblas`](@ref).
-
-Registering a hook for a `name` that already has one is a no-op. Registration is expected to
-happen at load time (`__init__`).
-"""
-function register_park_hook!(park::Function; name::Symbol)
-    @lock REGISTRY_LOCK begin
-        if !any(h -> h.name === name, PARK_HOOKS)
-            push!(PARK_HOOKS, ParkHook(name, park))
-        end
-    end
+function _check_controls(name::Symbol, get, set, guard, quiesce, park)
+    prefix = "NestedThreading.register_pool!: pool $(repr(name))"
+    (get === nothing) == (set === nothing) || throw(
+        ArgumentError(
+            "$prefix has $(get === nothing ? "`set` but no `get`" : "`get` but no `set`"); " *
+                "a thread count needs both, to be snapshotted and restored."
+        )
+    )
+    park === nothing || get !== nothing || throw(
+        ArgumentError(
+            "$prefix has `park` but no `get`/`set`; `park` runs when a grant lowers " *
+                "the library's thread count, so it needs a count to watch."
+        )
+    )
+    all(isnothing, (get, guard, quiesce)) && throw(
+        ArgumentError(
+            "$prefix has no control; pass at least one of `get`/`set`, `guard` or " *
+                "`quiesce`."
+        )
+    )
     return nothing
 end
 
 """
     quiesce_foreign_pools()
 
-Ask every registered [`QuiescePool`](@ref) to release Julia's worker threads, so that a region
-about to be opened on Julia's own scheduler can actually use them.
+Call every registered `quiesce` hook (see [`register_pool!`](@ref)), so that a region
+about to be opened on Julia's own scheduler can actually use Julia's worker threads.
 
 [`@budgeted_threads`](@ref) and [`@budgeted`](@ref) call this for themselves, except when the
 loop they are wrapping is a `Polyester.@batch` — there the Polyester pool *is* the loop. Call
@@ -327,7 +306,7 @@ end
 #
 # All of these run with REGISTRY_LOCK held.
 #
-# Invariant, maintained by `register_counted_pool!` (which pushes to both) and by
+# Invariant, maintained by `register_pool!` (which pushes to all three) and by
 # `_snapshot!` (which resizes): `length(SAVED) == length(MAXIMA) == length(COUNTED_POOLS)`,
 # and index `i` refers to the same pool in all three.
 
@@ -427,14 +406,13 @@ end
 
 """
     _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
-        -> (id::Int, guarded_targets::Vector{Int})
+        -> (id::Int, guards::Vector{Tuple{GuardedPool,Int}})
 
 Push a requested restriction onto the active multiset, apply it to every counted pool, and
-return its `id` (to be handed back to `_exit!`) together with the per-
-[`GuardedPool`](@ref) budgets ([`GUARDED_POOLS`](@ref)-aligned) that this restriction,
-together with every other currently-active one, works out to. A guarded pool's entry is
-`capacity()` when nothing currently active restricts it, which is the caller's cue to skip
-guarding it entirely.
+return its `id` (to be handed back to `_exit!`) together with the guarded pools to invoke
+and the budget each gets: those whose budget under this restriction and every other
+currently-active one is below `capacity()`. The list is copied under the lock, so a guard
+registered while the scope is open does not change it.
 
 On the transition from "no scope active" to "one scope active" the current counted-pool
 counts are snapshotted so that the *last* exit can restore them.
@@ -449,7 +427,12 @@ function _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
         id = (_NEXT_ACTIVE_ID[] += 1)
         push!(ACTIVE, ActiveRestriction(id, budget, exclude, only, kind))
         _apply!()
-        (id, Int[_effective_budget(pool.name, capacity()) for pool in GUARDED_POOLS])
+        guards = Tuple{GuardedPool,Int}[]
+        for pool in GUARDED_POOLS
+            target = _effective_budget(pool.name, capacity())
+            target < capacity() && push!(guards, (pool, target))
+        end
+        (id, guards)
     end
 end
 
@@ -460,8 +443,8 @@ Remove the restriction tagged `id` (as returned by [`_enter!`](@ref)) from the a
 multiset. Restores the snapshot when the last scope exits, otherwise re-applies what
 remains active.
 
-When the entry was a grant, every [`ParkHook`](@ref) whose pool went down as a result is
-called afterwards, still under the lock, so that no other grant can open and start using the
+When the entry was a grant, the `park` hook of every counted pool that went down as a result
+is called afterwards, still under the lock, so that no other grant can open and start using the
 workers while they are being released.
 """
 function _exit!(id::Int)
@@ -546,7 +529,7 @@ Only enclosing scopes count (see `_ENCLOSING_LIMITS`), since the skipped call re
 scope that made it a no-op staying open until it returns. That holds on the task that opened
 the scope and on every task its body waits for; a task spawned inside a scope and never
 waited for can outlive it, and then runs unrestricted once the scope exits. It also relies
-on a guard acting for the whole process while it is held (see [`GuardedPool`](@ref)).
+on a guard acting for the whole process while it is held (see [`register_pool!`](@ref)).
 """
 function _limit_in_force(budget::Int, exclude::Tuple, only)
     limits = _enclosing_limits()
@@ -576,22 +559,20 @@ end
 # partial hard limit is open around it: parking OpenBLAS under a threaded call on another task
 # is not safe, and inside a loop with spare threads per worker such a call may be in flight.
 function _lowered_park_hooks(before::Vector{Int})
-    hooks = ParkHook[]
-    isempty(PARK_HOOKS) && return hooks
+    hooks = Any[]
     for (i, pool) in enumerate(COUNTED_POOLS)
+        pool.park === nothing && continue
         now = _effective_budget(pool.name, SAVED[i])
         if now < before[i] && !_partial_limit_open(pool.name)
-            for hook in PARK_HOOKS
-                hook.name === pool.name && push!(hooks, hook)
-            end
+            push!(hooks, pool.park)
         end
     end
     return hooks
 end
 
-@noinline function _run_park_hooks(hooks::Vector{ParkHook})
-    for hook in hooks
-        hook.park()
+@noinline function _run_park_hooks(hooks::Vector{Any})
+    for park in hooks
+        park()
     end
     return nothing
 end

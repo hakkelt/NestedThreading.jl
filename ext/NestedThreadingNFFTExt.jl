@@ -4,7 +4,7 @@ import NestedThreading
 import NFFT
 
 # `NFFT._use_threads[]` is a boolean toggle with an imperative setter, so it is registered
-# as a CountedPool rather than a GuardedPool: that routes it through the refcounted
+# as a thread count (`get`/`set`) rather than a guard: that routes it through the refcounted
 # snapshot/restore in the registry instead of having each scope save and restore the global
 # itself (which is precisely the interleaving bug this package fixes).
 #
@@ -24,9 +24,7 @@ _get_threads() = NFFT._use_threads[] ? _full() : 1
 _set_threads(n::Integer) = (NFFT._use_threads[] = n >= _full())
 
 function __init__()
-    return NestedThreading.register_counted_pool!(
-        _get_threads, _set_threads; name = :nfft
-    )
+    return NestedThreading.register_pool!(:nfft; get = _get_threads, set = _set_threads)
 end
 
 end # module NestedThreadingNFFTExt

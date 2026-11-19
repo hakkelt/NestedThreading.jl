@@ -1,19 +1,14 @@
 # Scoped budget API built on the refcounted registry.
 
-# Compose every registered guard around `f`. Recursive rather than a loop so the abstract
-# `guard` call is the only dynamic dispatch and it stays out of the caller's inlining.
-# `targets` is `GUARDED_POOLS`-aligned and already reflects every currently-active
-# restriction (including this one) and its `exclude`/`only`; a pool whose target is not
-# below `capacity()` is left unguarded.
-@noinline function _run_guarded(f::F, targets::Vector{Int}, i::Int) where {F}
-    i > length(GUARDED_POOLS) && return f()
-    target = targets[i]
-    if target >= capacity()
-        return _run_guarded(f, targets, i + 1)
-    end
-    pool = GUARDED_POOLS[i]
+# Compose the guards `_enter!` selected around `f`. Recursive rather than a loop so the
+# abstract `guard` call is the only dynamic dispatch and it stays out of the caller's
+# inlining. `guards` already reflects every currently-active restriction (including this one)
+# and its `exclude`/`only`, and holds only the pools whose budget is below `capacity()`.
+@noinline function _run_guarded(f::F, guards::Vector{Tuple{GuardedPool,Int}}, i::Int) where {F}
+    i > length(guards) && return f()
+    pool, target = guards[i]
     return pool.guard(target) do
-        _run_guarded(f, targets, i + 1)
+        _run_guarded(f, guards, i + 1)
     end
 end
 
@@ -38,13 +33,11 @@ restriction that applies to that pool (see `exclude`/`only` below), so
   task spawned inside a scope and never waited for does not guarantee. Julia 1.11 and later
   only; on 1.10 every scope is entered.
 
-By default a restriction applies to every registered pool, [`CountedPool`](@ref)s and
-[`GuardedPool`](@ref)s alike. Two keywords narrow that:
+By default a restriction applies to every registered pool, thread counts and guards alike
+(see [`register_pool!`](@ref)). Two keywords narrow that:
 
 * `exclude`: a denylist of pool names this restriction does not apply to. Naming a pool
-  that turns out to be a [`CountedPool`](@ref) actually leaves it alone now — earlier this
-  only ever affected guards, and silently did nothing for a counted pool's budget, which
-  was a bug. Naming a pool that is not currently registered at all is not an error: a
+  leaves its thread count and its guard alone. Naming a pool that is not currently registered at all is not an error: a
   caller may exclude a pool whose package is not loaded in this session.
 * `only`: an allowlist — when given, this restriction applies to *only* these pools and
   none else, leaving everything unnamed alone entirely (not merely unrestricted-by-this-
@@ -53,10 +46,10 @@ By default a restriction applies to every registered pool, [`CountedPool`](@ref)
   "restrict exactly these pools" is not expressible as a denylist without enumerating every
   other pool, which breaks whenever a new one registers.
 
-[`GuardedPool`](@ref)s are invoked only when the budget applying to them is below
+Guards are invoked only when the budget applying to them is below
 [`capacity`](@ref), and receive that budget. Polyester's guard switches it off outright
 rather than limiting it proportionally — a partial limit was tried and measured far worse
-in the saturated regime; see [`GuardedPool`](@ref). [`@budgeted_batch`](@ref) uses
+in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref) uses
 `exclude = (:polyester,)` because there the outer loop *is* the Polyester consumer.
 
 !!! note "Guards are decided once, at entry"
@@ -104,21 +97,21 @@ end
 
 function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where {F}
     budget = max(1, Int(n))
-    # `guarded_targets` is `GUARDED_POOLS`-aligned and already reflects every
-    # currently-active restriction, computed once at entry under the registry lock. Guards
+    # `guards` reflects every currently-active restriction, computed once at entry under
+    # the registry lock. Guards
     # are lexical wrappers and so are decided here, once, and never revised — see the
     # docstring for what that costs. Counted pools go on tracking the live minimum through
     # `_enter!`/`_exit!` for as long as the scope is open.
     # A limit an enclosing scope already enforces could change nothing; see `_limit_in_force`.
     kind === :limit && _limit_in_force(budget, exclude, only) && return f()
-    id, guarded_targets = _enter!(budget, exclude, only, kind)
+    id, guards = _enter!(budget, exclude, only, kind)
     return try
         if kind === :limit
             _with_enclosing_limit(ActiveRestriction(id, budget, exclude, only, kind)) do
-                _run_guarded(f, guarded_targets, 1)
+                _run_guarded(f, guards, 1)
             end
         else
-            _run_guarded(f, guarded_targets, 1)
+            _run_guarded(f, guards, 1)
         end
     finally
         _exit!(id)
@@ -175,8 +168,8 @@ no scope is open: it restores threading that a soft default took away, it does n
 threads a caller turned off by hand with, e.g., `BLAS.set_num_threads(1)`. Several grants open
 at once combine by maximum.
 
-When a grant closes and a pool's count goes down as a result, the pool's
-[`ParkHook`](@ref)s run, so that a library whose idle workers would otherwise go on spinning
+When a grant closes and a pool's count goes down as a result, the pool's `park` hook runs
+(see [`register_pool!`](@ref)), so that a library whose idle workers would otherwise go on spinning
 (OpenBLAS) releases them. That costs something (about a millisecond for OpenBLAS, counting
 the pool's restart at the next grant), so a grant belongs around a call that is worth
 several milliseconds, not around a small one. Decide whether a call is large enough
@@ -205,8 +198,8 @@ with_restricted_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=noth
 """
     with_full_threads(f; exclude = (), only = nothing)
 
-Run `f()` requesting full threading: every [`CountedPool`](@ref) at [`capacity`](@ref) and
-every [`GuardedPool`](@ref) *enabled*. Unlike a plain unwrapped call this actively turns
+Run `f()` requesting full threading: every registered thread count at [`capacity`](@ref)
+and every guarded library *enabled*. Unlike a plain unwrapped call this actively turns
 guarded libraries on (e.g. sets `NFFT._use_threads[] = true`), which is what a call site
 with an explicit `threaded = true` switch needs.
 
@@ -219,7 +212,7 @@ with_full_threads(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing) w
 """
     enable_full_threading()
 
-Permanently set every registered [`CountedPool`](@ref) to its registration-time maximum —
+Permanently set every registered thread count to its registration-time value —
 the process-wide escape hatch for code that only ever runs one thing at a time and wants
 every library at full throttle.
 

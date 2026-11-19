@@ -3,11 +3,12 @@
     if VERSION >= v"1.11"
         for name in (
                 :with_thread_budget, :with_thread_default, :with_thread_grant,
-                :register_counted_pool!, :register_guarded_pool!, :register_quiesce_pool!,
-                :register_park_hook!, :CountedPool, :GuardedPool, :QuiescePool, :ParkHook,
-                :park_openblas, :capacity, :budget_for,
+                :register_pool!, :capacity, :budget_for,
             )
             @test Base.ispublic(NestedThreading, name)
+        end
+        for name in (:CountedPool, :GuardedPool, :QuiescePool, :park_openblas)
+            @test !Base.ispublic(NestedThreading, name)
         end
     end
 end
@@ -19,29 +20,39 @@ end
     @test :blas in [p.name for p in NT.COUNTED_POOLS]
     @test :probe in [p.name for p in NT.COUNTED_POOLS]
     @test :probe_guard in [p.name for p in NT.GUARDED_POOLS]
+    @test :probe_quiesce in [p.name for p in NT.QUIESCE_POOLS]
     @test length(NT.SAVED) == length(NT.COUNTED_POOLS)
     @test length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
 
-    # Registering the same name twice is a no-op rather than a duplicate pool.
-    before = length(NT.COUNTED_POOLS)
-    NT.register_counted_pool!(() -> 1, identity; name=:probe)
-    @test length(NT.COUNTED_POOLS) == before
-    @test count(p -> p.name === :probe, NT.COUNTED_POOLS) == 1
-
-    # ...and the same for guarded pools.
-    before_guarded = length(NT.GUARDED_POOLS)
-    NT.register_guarded_pool!((f, budget) -> f(); name=:probe_guard)
-    @test length(NT.GUARDED_POOLS) == before_guarded
-    @test count(p -> p.name === :probe_guard, NT.GUARDED_POOLS) == 1
-
-    # ...and the same for quiesce pools.
-    before_quiesce = length(NT.QUIESCE_POOLS)
-    NT.register_quiesce_pool!(() -> nothing; name = :probe_quiesce)
-    @test length(NT.QUIESCE_POOLS) == before_quiesce
-    @test count(p -> p.name === :probe_quiesce, NT.QUIESCE_POOLS) == 1
-
-    # The three parallel arrays stay index-aligned after all of that.
-    @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
+    # Every rejected registration leaves the registry exactly as it was.
+    state() = (
+        copy(NT.POOL_NAMES), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
+        length(NT.QUIESCE_POOLS), length(NT.SAVED), length(NT.MAXIMA),
+    )
+    before = state()
+    g() = 1
+    s(n) = n
+    @test_throws "a pool named :probe is already registered" NT.register_pool!(
+        :probe; get = g, set = s
+    )
+    @test_throws "a pool named :probe_guard is already registered" NT.register_pool!(
+        :probe_guard; quiesce = () -> nothing
+    )
+    @test_throws "has `get` but no `set`" NT.register_pool!(:bad_probe; get = g)
+    @test_throws "has `set` but no `get`" NT.register_pool!(:bad_probe; set = s)
+    @test_throws "has `park` but no `get`/`set`" NT.register_pool!(
+        :bad_probe; guard = (f, n) -> f(), park = () -> nothing
+    )
+    @test_throws "has no control" NT.register_pool!(:bad_probe)
+    @test_throws ArgumentError NT.register_pool!(:bad_probe)
+    @test_throws "returned 2.0 of type Float64" NT.register_pool!(
+        :bad_probe; get = () -> 2.0, set = s
+    )
+    @test_throws "returned nothing of type Nothing" NT.register_pool!(
+        :bad_probe; get = () -> nothing, set = s
+    )
+    @test state() == before
+    @test !(:bad_probe in NT.POOL_NAMES)
 end
 
 @testitem "quiesce_foreign_pools calls every registered hook once" tags = [:registry] setup = [Probe] begin
@@ -70,7 +81,7 @@ end
     # later `late[]` into a `MethodError` on `nothing`.
     const late = Ref(12)
     NT.with_thread_budget(1) do
-        NT.register_counted_pool!(() -> late[], n -> (late[] = n); name=:late_probe)
+        NT.register_pool!(:late_probe; get = () -> late[], set = n -> (late[] = n))
         @test late[] == 1                       # the restriction reached the newcomer
     end
     @test late[] == 12                          # ...and its own value came back
@@ -85,6 +96,23 @@ end
         @test late[] == 3
     end
     @test late[] == 12
+
+    # A guard registered inside an open scope does not apply to that scope, and the scope
+    # still runs to completion; the next restricted scope invokes it. `const` for the same
+    # reason as `late`.
+    const late_guarded = Threads.Atomic{Int}(0)
+    result = NT.with_thread_budget(1) do
+        NT.register_pool!(
+            :late_guard; guard = (f, n) -> (Threads.atomic_add!(late_guarded, 1); f())
+        )
+        :body_done
+    end
+    @test result === :body_done
+    @test late_guarded[] == 0
+    NT.with_thread_budget(1) do
+        nothing
+    end
+    @test late_guarded[] == 1
 end
 
 @testitem "scoped save/apply/restore" tags = [:registry] setup = [Probe] begin
@@ -529,7 +557,7 @@ end
     using NestedThreading, LinearAlgebra
     const NT = NestedThreading
 
-    @test any(h -> h.name === :blas && h.park === NT.park_openblas, NT.PARK_HOOKS)
+    @test any(p -> p.name === :blas && p.park === NT.park_openblas, NT.COUNTED_POOLS)
     A = randn(256, 256)
     expected = A * A
     original = BLAS.get_num_threads()
