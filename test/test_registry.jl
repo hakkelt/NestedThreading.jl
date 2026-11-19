@@ -99,6 +99,17 @@ end
         @test byname(:blas).effective == BLAS.get_num_threads()
     end
     @test byname(:probe).current == 16
+
+    # The single-pool query reports the same entry as the full listing.
+    for name in NT.POOL_NAMES[]
+        @test thread_pool_info(name) == byname(name)
+    end
+    with_thread_limit(3; only = :probe) do
+        @test thread_pool_info(:probe) == byname(:probe)
+        @test thread_pool_info(:probe).effective == 3
+    end
+    @test thread_pool_info(:probe_guard).has_guard
+    @test thread_pool_info(:probe_guard).current === nothing
 end
 
 @testitem "quiesce_foreign_pools calls every registered hook once" tags = [:registry] setup = [Probe] begin
@@ -841,9 +852,13 @@ end
     @test_logs (:debug, r"thread_limit: no pool named :no_such_pool") min_level = D NT.thread_limit(
         :no_such_pool
     )
+    @test (@test_logs (:debug, r"thread_pool_info: no pool named :no_such_pool") min_level = D thread_pool_info(
+        :no_such_pool
+    )) === nothing
     # Registered names, and a count of at least 1, are not reported.
     @test_logs min_level = D with_thread_limit(noop, 2; exclude = (:probe,))
     @test_logs min_level = D NT.thread_limit(:probe)
+    @test_logs min_level = D thread_pool_info(:probe)
 
     @test_logs (:debug, r"Thread count 0 raised to 1") min_level = D match_mode = :any with_thread_limit(
         noop, 0

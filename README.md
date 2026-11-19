@@ -48,7 +48,7 @@ runtime, and applied around the loop as a thread limit — once per loop, not on
 | `with_thread_limit(f, n)` | hard limit of `n` threads; nested scopes cannot widen it |
 | `with_thread_default(f, n)` | soft default of `n` threads, which a grant nested inside may override |
 | `with_thread_grant(f, n)` | `n` threads for a call worth threading, despite a soft default (never past a hard limit) |
-| `thread_pool_info()` | which libraries are registered, with their controls and current, unrestricted and effective counts |
+| `thread_pool_info([name])` | which libraries are registered, with their controls and current, unrestricted and effective counts |
 
 Public but not exported, in the `NestedThreading.` namespace:
 

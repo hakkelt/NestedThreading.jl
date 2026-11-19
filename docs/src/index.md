@@ -108,6 +108,9 @@ current, unrestricted and effective thread counts:
 [p.name => p.current for p in thread_pool_info() if p.has_count]
 ```
 
+`thread_pool_info(:blas)` gives the same entry for one library, or `nothing` if no library is
+registered under that name.
+
 ## Seeing what was skipped
 
 NestedThreading never throws at a call site that uses a scope. When it cannot act on part of a
