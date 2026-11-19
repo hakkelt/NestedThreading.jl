@@ -37,11 +37,11 @@ end
 
 With `Threads.threadpoolsize() == 8` the loop of 32 items already saturates the machine, so every
 registered library is limited to one thread inside the body. A loop of 2 items instead gets
-a budget of 4, for 2 workers × 4 inner threads. The arithmetic is
+a per-worker budget of 4, for 2 workers × 4 inner threads. The arithmetic is
 `max(1, capacity() ÷ length(range))`, evaluated at runtime — the range may have a length that
 is only known then.
 
-The budget is applied **around the loop**, once, before the parallel region opens; it is not
+The budget is applied as a thread limit **around the loop**, once, before the parallel region opens; it is not
 re-entered on every iteration.
 
 ### Turning the loop off
@@ -80,6 +80,19 @@ op.threaded ? with_threads_enabled(() -> f(x)) : with_threads_disabled(() -> f(x
 [`with_threads_enabled`](@ref) actively *enables* libraries that default to off (NFFT), and is
 still clamped by any outer restriction, so it is safe to call from inside a batch loop.
 
+[`with_thread_limit`](@ref) takes an explicit count, and [`with_thread_default`](@ref) /
+[`with_thread_grant`](@ref) let a computation run serial by default and widen only the calls
+worth threading; see [Composition rules](@ref).
+
+### Inspecting the registry
+
+[`thread_pool_info`](@ref) lists every registered library with the controls it has and its
+current, unrestricted and effective thread counts:
+
+```julia
+[p.name => p.current for p in thread_pool_info() if p.has_count]
+```
+
 ## Seeing what was skipped
 
 NestedThreading never throws at a call site that uses a scope. When it cannot act on part of a
@@ -98,18 +111,18 @@ ENV["JULIA_DEBUG"] = "NestedThreading"
 
 Registration is automatic via package extensions — have the package loaded and it works:
 
-| Library | Kind | Control used |
+| Library | Controls | What is used |
 | --- | --- | --- |
-| BLAS | counted | `BLAS.get_num_threads`/`set_num_threads` via libblastrampoline |
-| MKL | counted | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
-| FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
-| NFFT | counted (boolean) | `NFFT._use_threads[]` |
-| Polyester, LoopVectorization, Octavian | guarded | every PolyesterWeave worker reserved, as `disable_polyester_threads` does; covers `@batch`, `@tturbo` and Octavian's threaded kernels |
-| Strided | counted | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
+| BLAS | `get`/`set`, `park` | `BLAS.get_num_threads`/`set_num_threads` via libblastrampoline; `park` shuts OpenBLAS's workers down |
+| MKL | `get`/`set` | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
+| FFTW | `get`/`set` | `FFTW.get_num_threads`/`set_num_threads` |
+| NFFT | `get`/`set` (boolean) | `NFFT._use_threads[]` |
+| Polyester, LoopVectorization, Octavian | `guard`, `quiesce` | every PolyesterWeave worker reserved, as `disable_polyester_threads` does; covers `@batch`, `@tturbo` and Octavian's threaded kernels |
+| Strided | `get`/`set` | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
 
 MKL gets its own pool alongside the always-on BLAS one: `BLAS.set_num_threads` is supposed
 to forward to MKL through libblastrampoline, but the two do not reliably stay in sync
-([MKL.jl#174](https://github.com/JuliaLinearAlgebra/MKL.jl/issues/174)), so a budget scope
+([MKL.jl#174](https://github.com/JuliaLinearAlgebra/MKL.jl/issues/174)), so a scope
 also drives MKL's native thread count directly.
 
 See [Adding a library](@ref) to register one this package does not ship.

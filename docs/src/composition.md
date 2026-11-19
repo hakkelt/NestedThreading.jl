@@ -4,13 +4,17 @@ Everything in this package reduces to [`NestedThreading.with_thread_limit`](@ref
 below are what make it safe to use from library code that does not know what its caller is
 doing.
 
-## Budgets are refcounted, process-wide
+The loop macros compute a per-worker *budget*, `max(1, capacity() ÷ length(range))`, and open
+a thread limit of that size around the loop. Everything else on this page is about the limits
+and the other scopes, which do not know where their count came from.
 
-The registry keeps a multiset of every budget scope currently active anywhere in the process.
+## Limits are refcounted, process-wide
+
+The registry keeps a multiset of every scope currently active anywhere in the process.
 
 * On the transition from *no scope* to *one scope*, the current thread counts are
   snapshotted.
-* While any scope is open, the applied count is `minimum` over all active budgets.
+* While any scope is open, the applied count is `minimum` over all active limits.
 * On the transition back to *no scope*, the snapshot is restored.
 
 ## Nesting only ever narrows
@@ -28,6 +32,18 @@ on, because the applied value is the minimum. This matters for operator algebra:
 operator whose body contains another batched operator, or an NFFT operator constructed with
 `threaded = true` that ends up being called from inside a saturated loop, both compose
 correctly without either site knowing about the other.
+
+A limit nested in an enclosing one that already holds every library it covers at or below its
+count is not entered at all: it could change nothing, so its body runs directly, without the
+lock round trip that otherwise makes a scope cost microseconds. "Enclosing" means opened on the
+same task, or on a task it was spawned from while the scope was open, such as a
+[`@budgeted_threads`](@ref) worker. [`NestedThreading.thread_limit`](@ref) reports the
+same enclosing limit for one library.
+
+!!! note "Julia 1.10"
+    Tracking enclosing scopes needs `Base.ScopedValues`, which arrived in Julia 1.11. On
+    1.10 every nested limit is entered (the result is the same, only slower), and
+    `thread_limit` always returns `nothing`.
 
 ## Concurrent scopes cannot corrupt each other
 
@@ -54,12 +70,12 @@ nothing in Julia can give them any. Taking the minimum over all active scopes th
     A long-lived restricted scope throttles the whole process for as long as it is open. This
     is deliberate — the alternative direction (letting the widest request win) oversubscribes,
     which is the problem this package exists to solve — but it is worth knowing before opening
-    a budget scope around a long-running operation.
+    a restricting scope around a long-running operation.
 
 ## All-or-nothing libraries
 
-Polyester and NFFT are switched **off whenever the applied budget is below
-[`NestedThreading.capacity`](@ref)**, not only when it is 1: a budget of 4 inside an
+Polyester and NFFT are switched **off whenever the applied limit is below
+[`NestedThreading.capacity`](@ref)**, not only when it is 1: a limit of 4 inside an
 8-thread outer loop still means the machine is fully occupied, and a nested Polyester loop
 spawning its own workers on top of that is exactly the oversubscription being avoided. NFFT
 has no partial control at all; Polyester does, and it is deliberately not used — see the
@@ -89,7 +105,7 @@ restriction.
 
     `BenchHelpers.regime_warning` in the test suite flags the mismatch when it sees one.
 
-!!! note "Why guarded pools are all-or-nothing"
+!!! note "Why guards are all-or-nothing"
     PolyesterWeave can reserve *some* worker slots, so an obvious refinement is to reserve
     only the `capacity() ÷ budget` the outer loop is using and leave the rest for nested
     loops. That was implemented and measured: 2.7x better at `nthreads() = 8` with 2 outer
@@ -99,10 +115,10 @@ restriction.
     bounded factor in the under-subscribed regime and avoids an unbounded one in the
     saturated regime, so that is what the Polyester guard does.
 
-!!! note "Budget scopes themselves are free"
+!!! note "Scopes themselves are free"
     The benchmark suite asserts this rather than claiming it. Against a plain
     `Threads.@threads` loop, three controls all come out at 0.99-1.00x: a do-nothing closure
-    wrapper, a budget scope with the `:polyester` pool excluded, and the Polyester guard
+    wrapper, a limit scope with the `:polyester` pool excluded, and the Polyester guard
     wrapped around a loop with no `@batch` in it at all. Whatever budgeting costs or saves,
     none of it is overhead from this package.
 
@@ -113,19 +129,19 @@ restriction.
     across sockets, by far more than the effects being measured. Paired, the control numbers
     reproduce to within 1% run to run.
 
-## Guarded pools are decided at entry, counted pools are not
+## Guards are decided at entry, counts are not
 
-The two kinds of pool track the process-wide minimum differently, and the difference is
+The two kinds of control track the process-wide minimum differently, and the difference is
 observable.
 
-A counted pool is a global that the registry writes on every entry and exit, so it always
+A thread count is a global that the registry writes on every entry and exit, so it always
 reflects the *current* minimum: if another task opens a narrower scope while yours is
-running, your BLAS and FFTW counts drop with it. A guarded pool (see
-[`NestedThreading.register_pool!`](@ref)) has no global to write — the guard is a lexical wrapper around `f()`, and `f()` is already
-running. Whether a guard was entered is therefore decided once, from the budget at entry,
-and cannot be revised.
+running, your BLAS and FFTW counts drop with it. A guard (see
+[`NestedThreading.register_pool!`](@ref)) has no global to write — it is a lexical wrapper
+around `f()`, and `f()` is already running. Whether a guard was entered is therefore decided
+once, from the limit at entry, and cannot be revised.
 
-| | task A | task B | BLAS (counted) | Polyester (guarded) |
+| | task A | task B | BLAS (count) | Polyester (guard) |
 | --- | --- | --- | --- | --- |
 | 1 | opens a full-capacity scope | | `capacity()` | enabled |
 | 2 | | opens a scope at 1 | 1 | disabled **for B only** |
@@ -133,7 +149,7 @@ and cannot be revised.
 
 So a scope that opens while nothing is restricted runs its body unguarded even if the
 process is restricted underneath it a moment later. Note what is *not* affected: the
-counted pools are correct throughout (row 3, BLAS is at 1 for both tasks), and the opposite
+thread counts are correct throughout (row 3, BLAS is at 1 for both tasks), and the opposite
 direction is safe — a scope that entered restricted stays guarded for its whole body even
 after the other scope exits, which is conservative rather than oversubscribing.
 
@@ -144,9 +160,9 @@ around a call already in flight. If it matters for your workload, open the restr
 scope *before* spawning the tasks rather than from inside them, which is what the loop
 macros do — they wrap the loop, not the loop body.
 
-## A full budget raises, it does not merely permit
+## A limit of `capacity()` raises, it does not merely permit
 
-The applied budget is written to every counted pool unconditionally, so a scope that works
+The applied limit is written to every thread count unconditionally, so a scope that works
 out to [`NestedThreading.capacity`](@ref) — [`with_threads_enabled`](@ref), or a loop with a
 single item — sets the pools *up* to that value, past a lower count the caller may have
 configured by hand:
@@ -207,7 +223,7 @@ caller wants next.
 
 With `Threads.threadpoolsize() == 8`:
 
-| loop | trip count | budget | BLAS/FFTW inside | Polyester/NFFT inside |
+| loop | trip count | budget (limit) | BLAS/FFTW inside | Polyester/NFFT inside |
 | --- | --- | --- | --- | --- |
 | `@budgeted_threads for i in 1:32` | 32 | `max(1, 8 ÷ 32)` = 1 | 1 | off |
 | `@budgeted_threads for i in 1:2` | 2 | `8 ÷ 2` = 4 | 4 | off |

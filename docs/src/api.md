@@ -12,22 +12,23 @@ NestedThreading
 @budgeted_batch
 ```
 
-## Scoped budgets
+## Scopes
 
 ```@docs
 with_threads_disabled
 with_threads_enabled
-NestedThreading.reset_thread_counts!
-NestedThreading.with_thread_limit
-NestedThreading.with_thread_default
-NestedThreading.with_thread_grant
+with_thread_limit
+with_thread_default
+with_thread_grant
 NestedThreading.thread_limit
+NestedThreading.reset_thread_counts!
 ```
 
 ## Registry
 
 ```@docs
 NestedThreading.register_pool!
+thread_pool_info
 NestedThreading.capacity
 ```
 

@@ -47,7 +47,7 @@ const GUARDED_POOLS = GuardedPool[]
 const QUIESCE_POOLS = QuiescePool[]
 
 # Parallel to COUNTED_POOLS:
-const MAXIMA = Int[]   # each pool's count at registration time (its "full throttle" value)
+const MAXIMA = Int[]   # each pool's count at registration time (its unrestricted value)
 const SAVED = Int[]    # snapshot taken on the empty -> non-empty ACTIVE transition
 
 """

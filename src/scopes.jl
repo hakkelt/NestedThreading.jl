@@ -18,7 +18,7 @@ end
 Run `f()` with every registered threaded library limited to `n` threads, restoring the
 previous state afterwards (also on exception). Returns `f()`'s value.
 
-The budget actually applied to a pool is the `minimum` over every *currently-active*
+The limit actually applied to a pool is the `minimum` over every *currently-active*
 restriction that applies to that pool (see `exclude`/`only` below), so
 
 * nesting can only ever narrow, never widen, an outer restriction — an inner
@@ -42,20 +42,20 @@ By default a restriction applies to every registered pool, thread counts and gua
 * `only`: an allowlist — when given, this restriction applies to *only* these pools and
   none else, leaving everything unnamed alone entirely (not merely unrestricted-by-this-
   scope: if no other active scope restricts it either, it keeps its pre-scope value even
-  past this scope's own budget). This is what `with_serial_blas`-style call sites need:
-  "restrict exactly these pools" is not expressible as a denylist without enumerating every
+  past this scope's own limit). This is what a call site that wants, say, serial BLAS
+  needs: "restrict exactly these pools" is not expressible as a denylist without enumerating every
   other pool, which breaks whenever a new one registers.
 
-Guards are invoked only when the budget applying to them is below
-[`capacity`](@ref), and receive that budget. Polyester's guard switches it off outright
+Guards are invoked only when the limit applying to them is below
+[`capacity`](@ref), and receive that limit. Polyester's guard switches it off outright
 rather than limiting it proportionally — a partial limit was tried and measured far worse
 in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref) uses
 `exclude = (:polyester,)` because there the outer loop *is* the Polyester consumer.
 
 !!! note "Guards are decided once, at entry"
     Counted pools follow the applied minimum for as long as the scope is open — another
-    task narrowing the budget lowers them immediately. Guards cannot work that way: a
-    guard is a lexical wrapper around `f()`, so whether it runs is decided from the budget
+    task narrowing the limit lowers them immediately. Guards cannot work that way: a
+    guard is a lexical wrapper around `f()`, so whether it runs is decided from the limit
     *at entry* and cannot be revised afterwards.
 
     So a scope that enters while nothing is restricted runs its body unguarded even if a
@@ -66,14 +66,14 @@ in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref)
     unrestricted; if it matters, open the restricting scope before spawning the tasks
     rather than from inside them.
 
-!!! note "A budget of `capacity()` raises, it does not merely permit"
-    The budget is applied to every counted pool this restriction applies to
+!!! note "A limit of `capacity()` raises, it does not merely permit"
+    The limit is applied to every counted pool this restriction applies to
     unconditionally, so a scope whose budget works out to [`capacity`](@ref) —
     `with_threads_enabled`, or a loop with a single item — sets those pools *up* to that
     value for its duration, even past a lower count the caller had configured
     (`BLAS.set_num_threads(2)`, say). The original counts are restored on exit like any
     other scope. This is what makes `with_threads_enabled` able to turn NFFT on; if a
-    hand-tuned lower count must be preserved, do not open a full-throttle scope around it
+    hand-tuned lower count must be preserved, do not open an unrestricted scope around it
     — or `exclude`/`only` it out of one.
 
     A pool named in `exclude`, or left out of `only`, is not "permitted" either way: as
@@ -177,8 +177,7 @@ When a grant closes and a pool's count goes down as a result, the pool's `park` 
 (OpenBLAS) releases them. That costs something (about a millisecond for OpenBLAS, counting
 the pool's restart at the next grant), so a grant belongs around a call that is worth
 several milliseconds, not around a small one. Decide whether a call is large enough
-*before* opening the scope, as every call site in the operator stack does, rather than
-opening one per call and letting it do nothing: opening a scope costs a lock and a pass over
+*before* opening the scope rather than opening one per call and letting it do nothing: opening a scope costs a lock and a pass over
 the registry either way.
 
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
@@ -202,10 +201,12 @@ with_threads_disabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothin
 """
     with_threads_enabled(f; exclude = (), only = nothing)
 
-Run `f()` requesting full threading: every registered thread count at [`capacity`](@ref)
-and every guarded library *enabled*. Unlike a plain unwrapped call this actively turns
-guarded libraries on (e.g. sets `NFFT._use_threads[] = true`), which is what a call site
-with an explicit `threaded = true` switch needs.
+Run `f()` with every registered thread count at [`capacity`](@ref). The scope adds no guard
+of its own; a guard runs only if another open restriction lowers the limit below
+`capacity()` at entry. Unlike a plain unwrapped call this actively raises the counts, so it turns on a library that
+defaults to off (it sets `NFFT._use_threads[] = true`, for instance), which is what a call
+site with an explicit `threaded = true` switch needs. Equivalent to
+`with_thread_limit(f, capacity())`.
 
 Still clamped by any outer restriction, so calling it inside a saturated batch loop is
 safe and does nothing.
@@ -219,7 +220,7 @@ with_threads_enabled(f::F; exclude::Tuple=(), only::Union{Nothing,Tuple}=nothing
 Set every registered thread count back to the value it had when its library registered,
 both now (if no scope is open) and as the value the last scope to close restores. This is
 the process-wide escape hatch for code that only ever runs one thing at a time and wants
-every library back at the count it started with, typically full throttle, after something
+every library back at the count it started with, typically unrestricted, after something
 lowered it by hand (`BLAS.set_num_threads(1)`, say).
 
 Scopes still win while they are open; this only changes what the process returns to when
