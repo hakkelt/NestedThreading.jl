@@ -87,7 +87,7 @@ loaded:
 | MKL | counted | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]`, on only when nothing is restricted |
-| Polyester | guarded | `disable_polyester_threads` |
+| Polyester, LoopVectorization, Octavian | guarded | every PolyesterWeave worker reserved, as `disable_polyester_threads` does; covers `@batch`, `@tturbo` and Octavian's threaded kernels |
 | Strided | counted | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
 
 MKL gets its own pool alongside the always-on BLAS one, rather than instead of it:

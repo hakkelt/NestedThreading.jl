@@ -10,7 +10,7 @@
 
     @test ext(:NestedThreadingFFTWExt) !== nothing
     @test :fftw in counted
-    @test ext(:NestedThreadingPolyesterExt) !== nothing
+    @test ext(:NestedThreadingPolyesterWeaveExt) !== nothing
     @test :polyester in guarded
     @test ext(:NestedThreadingNFFTExt) !== nothing
     @test :nfft in counted
@@ -157,4 +157,51 @@ end
         end
         @test length(unique(tids)) > 1
     end
+end
+
+@testitem "the PolyesterWeave guard covers LoopVectorization's @tturbo" tags = [:extensions] begin
+    using NestedThreading, LoopVectorization
+    const NT = NestedThreading
+    const PW = LoopVectorization.PolyesterWeave
+
+    # `@tturbo` takes its workers from `PolyesterWeave.request_threads`, the same slots the
+    # guard reserves, so inside a restricted scope it finds none free and runs serially.
+    function free_workers()
+        masks = last(PW.request_threads(Threads.nthreads()))
+        n = sum(count_ones, masks)
+        foreach(PW.free_threads!, masks)
+        return n
+    end
+    if NT.capacity() > 1
+        @test free_workers() > 0
+        @test NT.with_thread_budget(free_workers, 1) == 0
+        @test NT.with_thread_budget(free_workers, NT.capacity() - 1) == 0
+        @test free_workers() > 0
+    end
+
+    function double!(y, x)
+        @tturbo for i in eachindex(y)
+            y[i] = 2 * x[i]
+        end
+        return y
+    end
+    xs = [rand(1 << 14) for _ in 1:Threads.nthreads()]
+    ys = map(similar, xs)
+    @budgeted_threads for j in eachindex(xs)
+        double!(ys[j], xs[j])
+    end
+    @test all(ys[j] == 2 .* xs[j] for j in eachindex(xs))
+end
+
+@testitem "the PolyesterWeave extension loads without Polyester" tags = [:extensions] begin
+    # LoopVectorization pulls in PolyesterWeave and ThreadingUtilities but not Polyester; the
+    # extension must load from those indirect dependencies alone.
+    code = """
+    using NestedThreading, LoopVectorization
+    print(Base.get_extension(NestedThreading, :NestedThreadingPolyesterWeaveExt) !== nothing,
+          " ", !any(id -> id.name == "Polyester", keys(Base.loaded_modules)),
+          " ", :polyester in [p.name for p in NestedThreading.GUARDED_POOLS])
+    """
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`
+    @test read(cmd, String) == "true true true"
 end

@@ -90,7 +90,7 @@ Registration is automatic via package extensions — have the package loaded and
 | MKL | counted | `MKL.get_num_threads`/`set_num_threads`, MKL's own native functions |
 | FFTW | counted | `FFTW.get_num_threads`/`set_num_threads` |
 | NFFT | counted (boolean) | `NFFT._use_threads[]` |
-| Polyester | guarded | `disable_polyester_threads` |
+| Polyester, LoopVectorization, Octavian | guarded | every PolyesterWeave worker reserved, as `disable_polyester_threads` does; covers `@batch`, `@tturbo` and Octavian's threaded kernels |
 | Strided | counted | `Strided.get_num_threads`/`set_num_threads`, clamped to `Threads.nthreads()` |
 
 MKL gets its own pool alongside the always-on BLAS one: `BLAS.set_num_threads` is supposed

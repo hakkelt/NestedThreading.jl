@@ -180,7 +180,7 @@ end
 
     # A nested Polyester loop is switched off inside any restricted scope, regardless of how
     # much headroom the budget nominally leaves. Limiting it proportionally instead was
-    # measured 320x worse in the saturated regime; see the Polyester extension.
+    # measured 320x worse in the saturated regime; see the PolyesterWeave extension.
     nested_threads(trip) = begin
         distinct = zeros(Int, trip)
         @budgeted_threads for j in 1:trip

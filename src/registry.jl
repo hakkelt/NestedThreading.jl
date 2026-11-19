@@ -28,7 +28,7 @@ library limited to `budget` threads, returning `f()`'s value. It is only ever ca
 Most such libraries can only be switched fully off, which is the right default: a partial
 limit was implemented for Polyester (which supports one) and measured 320x *worse* in the
 saturated regime, because at high thread counts a nested parallel loop is catastrophic
-however few workers it gets. See the Polyester extension for the numbers. `budget` is passed
+however few workers it gets. See the PolyesterWeave extension for the numbers. `budget` is passed
 anyway so a library with a genuinely proportional control can use it.
 
 A guard must act for the whole process while it is held, not only for the calling task:
@@ -75,7 +75,7 @@ those threads; it waits for them. Measured on an AMD EPYC 7352, 8 Julia threads,
     Polyester.@batch, after a quiesce                                5.0 us
 
 A 38x penalty, removed for a tenth of a microsecond, and re-waking the workers for the next
-`@batch` costs nothing measurable. See the Polyester extension and
+`@batch` costs nothing measurable. See the PolyesterWeave extension and
 <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
 
 Unlike [`GuardedPool`](@ref) this is not scoped and takes no budget: it is a one-shot "release
