@@ -36,7 +36,7 @@ end
 
     # Every rejected registration leaves the registry exactly as it was.
     state() = (
-        copy(NT.POOL_NAMES), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
+        copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
         length(NT.QUIESCE_POOLS), length(NT.SAVED), length(NT.MAXIMA),
     )
     before = state()
@@ -62,7 +62,7 @@ end
         :bad_probe; get = () -> nothing, set = s
     )
     @test state() == before
-    @test !(:bad_probe in NT.POOL_NAMES)
+    @test !(:bad_probe in NT.POOL_NAMES[])
 end
 
 @testitem "thread_pool_info describes the registry" tags = [:registry] setup = [Probe] begin
@@ -72,7 +72,7 @@ end
 
     info = thread_pool_info()
     @test info isa Vector{<:NamedTuple}
-    @test [p.name for p in info] == NT.POOL_NAMES
+    @test [p.name for p in info] == NT.POOL_NAMES[]
     byname(name, info = thread_pool_info()) = only(filter(p -> p.name === name, info))
 
     blas = byname(:blas, info)
@@ -769,4 +769,49 @@ end
     end
     @test isempty(NT.ACTIVE)
     @test Probe.VALUE[] == 16
+end
+
+@testitem "quiet skips are logged at debug level" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging
+    const NT = NestedThreading
+    Probe.reset!()
+    const D = Logging.Debug
+    noop() = nothing
+
+    # Unknown names stay legal (the library may register later) but are reported.
+    @test_logs (:debug, r"No pool named :no_such_pool is registered") min_level = D match_mode = :any with_thread_limit(
+        noop, 2; exclude = (:no_such_pool,)
+    )
+    @test_logs (:debug, r"No pool named :no_such_pool is registered") min_level = D match_mode = :any with_thread_default(
+        noop, 2; only = (:probe, :no_such_pool)
+    )
+    @test_logs (:debug, r"thread_limit: no pool named :no_such_pool") min_level = D NT.thread_limit(
+        :no_such_pool
+    )
+    # Registered names, and a count of at least 1, are not reported.
+    @test_logs min_level = D with_thread_limit(noop, 2; exclude = (:probe,))
+    @test_logs min_level = D NT.thread_limit(:probe)
+
+    @test_logs (:debug, r"Thread count 0 raised to 1") min_level = D match_mode = :any with_thread_limit(
+        noop, 0
+    )
+
+    # A grant that lowers a pool under a partial hard limit does not park it.
+    if NT.capacity() > 2
+        with_thread_limit(2) do
+            with_thread_default(1; only = (:probe,)) do
+                @test_logs (:debug, r"Pool :probe not parked") min_level = D match_mode = :any with_thread_grant(
+                    noop, NT.capacity(); only = (:probe,)
+                )
+            end
+        end
+        @test Probe.park_count() == 0
+    end
+
+    # A guard registered inside an open scope applies only to later scopes.
+    @test_logs (:debug, r"Guard of pool :debug_guard registered while a scope is open") min_level = D match_mode = :any with_thread_limit(
+        1
+    ) do
+        NT.register_pool!(:debug_guard; guard = (f, n) -> f())
+    end
 end

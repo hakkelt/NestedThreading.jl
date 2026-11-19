@@ -80,6 +80,20 @@ op.threaded ? with_threads_enabled(() -> f(x)) : with_threads_disabled(() -> f(x
 [`with_threads_enabled`](@ref) actively *enables* libraries that default to off (NFFT), and is
 still clamped by any outer restriction, so it is safe to call from inside a batch loop.
 
+## Seeing what was skipped
+
+NestedThreading never throws at a call site that uses a scope. When it cannot act on part of a
+request, it skips that part. Such cases are an `exclude`/`only` or `thread_limit` name no
+library has registered under (yet), a thread count below 1 (raised to 1), a library whose
+`park` hook is held back because a partial limit is open around it, a guard registered while a
+scope is open, and an OpenBLAS shutdown that found no `blas_thread_shutdown_`. Each one is
+reported through Julia's standard logging at the `Debug` level. Enable it for this package
+with the `JULIA_DEBUG` environment variable, before or after loading it:
+
+```julia
+ENV["JULIA_DEBUG"] = "NestedThreading"
+```
+
 ## Supported libraries
 
 Registration is automatic via package extensions — have the package loaded and it works:

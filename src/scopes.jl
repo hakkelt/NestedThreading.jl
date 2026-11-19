@@ -97,12 +97,16 @@ end
 
 function _with_scope(f::F, n::Integer, exclude::Tuple, only, kind::Symbol) where {F}
     budget = max(1, Int(n))
+    n < 1 && @debug "Thread count $n raised to 1."
+    (isempty(exclude) && only === nothing) || _debug_unknown_names(exclude, only)
     # `guards` reflects every currently-active restriction, computed once at entry under
     # the registry lock. Guards
     # are lexical wrappers and so are decided here, once, and never revised — see the
     # docstring for what that costs. Counted pools go on tracking the live minimum through
     # `_enter!`/`_exit!` for as long as the scope is open.
     # A limit an enclosing scope already enforces could change nothing; see `_limit_in_force`.
+    # Not logged: the skip honors the request in full, and a disabled `@debug` would still
+    # cost several times this path's own run time.
     kind === :limit && _limit_in_force(budget, exclude, only) && return f()
     id, guards = _enter!(budget, exclude, only, kind)
     return try

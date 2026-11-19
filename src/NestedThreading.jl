@@ -72,6 +72,10 @@ function park_openblas()
         handle = Libdl.dlopen(lib.libname; throw_error = false)
         handle === nothing && continue
         shutdown = Libdl.dlsym(handle, :blas_thread_shutdown_; throw_error = false)
+        # Logged with the registry lock held, since this runs as a park hook: a logger that
+        # waits for another task opening a scope would deadlock here.
+        shutdown === nothing &&
+            @debug "`blas_thread_shutdown_` not found in $(lib.libname); its threads were not shut down."
         shutdown === nothing || ccall(shutdown, Cint, ())
         Libdl.dlclose(handle)
     end

@@ -129,6 +129,20 @@ when it is 1 — a budget of 4 inside an 8-thread outer loop must not leave a ne
 loop free to spawn its own workers. Polyester can in fact be limited partially; doing so was
 measured 320x worse in the saturated regime and is deliberately not done.
 
+## Seeing what was skipped
+
+NestedThreading never throws at a call site that uses a scope. When it cannot act on part of a
+request, it skips that part. Such cases are an `exclude`/`only` or `thread_limit` name no
+library has registered under (yet), a thread count below 1 (raised to 1), a library whose
+`park` hook is held back because a partial limit is open around it, a guard registered while a
+scope is open, and an OpenBLAS shutdown that found no `blas_thread_shutdown_`. Each one is
+reported through Julia's standard logging at the `Debug` level. Enable it for this package
+with the `JULIA_DEBUG` environment variable, before or after loading it:
+
+```julia
+ENV["JULIA_DEBUG"] = "NestedThreading"
+```
+
 ## Tests
 
 ```sh

@@ -39,7 +39,9 @@ struct QuiescePool
     quiesce::Any
 end
 
-const POOL_NAMES = Symbol[]   # every registered name, whatever its capabilities
+# Every registered name, whatever its controls. Replaced, never mutated, under REGISTRY_LOCK,
+# so a reader without the lock gets a consistent vector.
+const POOL_NAMES = Ref(Symbol[])
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
 const QUIESCE_POOLS = QuiescePool[]
@@ -222,8 +224,8 @@ function register_pool!(
     park = nothing,
 )
     _check_controls(name, get, set, guard, quiesce, park)
-    @lock REGISTRY_LOCK begin
-        name in POOL_NAMES && throw(
+    scope_open = @lock REGISTRY_LOCK begin
+        name in POOL_NAMES[] && throw(
             ArgumentError(
                 "NestedThreading.register_pool!: a pool named $(repr(name)) is already " *
                     "registered. Each library is registered once, with all its controls in " *
@@ -242,7 +244,7 @@ function register_pool!(
             )
             current = Int(value)
         end
-        push!(POOL_NAMES, name)
+        POOL_NAMES[] = [POOL_NAMES[]; name]
         if get !== nothing
             push!(COUNTED_POOLS, CountedPool(name, get, set, park))
             push!(MAXIMA, current)
@@ -253,7 +255,10 @@ function register_pool!(
         end
         guard === nothing || push!(GUARDED_POOLS, GuardedPool(name, guard))
         quiesce === nothing || push!(QUIESCE_POOLS, QuiescePool(name, quiesce))
+        !isempty(ACTIVE)
     end
+    scope_open && guard !== nothing &&
+        @debug "Guard of pool $(repr(name)) registered while a scope is open; it applies only to scopes opened from now on."
     return nothing
 end
 
@@ -336,7 +341,7 @@ taken under the registry lock; it does not change as scopes open and close.
 function thread_pool_info()
     return @lock REGISTRY_LOCK begin
         info = PoolInfo[]
-        for name in POOL_NAMES
+        for name in POOL_NAMES[]
             i = findfirst(p -> p.name === name, COUNTED_POOLS)
             current = unrestricted = effective = nothing
             has_park = false
@@ -512,7 +517,7 @@ is called afterwards, still under the lock, so that no other grant can open and 
 workers while they are being released.
 """
 function _exit!(id::Int)
-    @lock REGISTRY_LOCK begin
+    not_parked = @lock REGISTRY_LOCK begin
         i = findfirst(e -> e.id == id, ACTIVE)
         was_grant = i !== nothing && ACTIVE[i].kind === :grant
         before = was_grant ? _current_budgets() : Int[]
@@ -522,7 +527,13 @@ function _exit!(id::Int)
         else
             _apply!()
         end
-        was_grant && _run_park_hooks(_lowered_park_hooks(before))
+        skipped = Symbol[]
+        was_grant && _run_park_hooks(_lowered_park_hooks(before, skipped))
+        skipped
+    end
+    # Logged after the lock is released, so that a logger never runs while it is held.
+    for name in not_parked
+        @debug "Pool $(repr(name)) not parked after its grant closed: a hard limit between 1 and capacity() is open around it, so another task may be inside a threaded call to it."
     end
     return nothing
 end
@@ -565,6 +576,8 @@ On Julia 1.10, which has no `ScopedValue`, enclosing scopes are not tracked and 
 returns `nothing`: a caller that acts on it then enters its scope, as it would anyway.
 """
 function thread_limit(name::Symbol)
+    name in POOL_NAMES[] ||
+        @debug "thread_limit: no pool named $(repr(name)) is registered; reporting the limits that would apply to it."
     limit = _hard_limit(name, _enclosing_limits())
     return limit == typemax(Int) ? nothing : limit
 end
@@ -625,16 +638,31 @@ end
 # The park hooks of the pools whose count is now below `before`. A pool is not parked while a
 # partial hard limit is open around it: parking OpenBLAS under a threaded call on another task
 # is not safe, and inside a loop with spare threads per worker such a call may be in flight.
-function _lowered_park_hooks(before::Vector{Int})
+# The names of the pools skipped for that reason are pushed to `skipped`.
+function _lowered_park_hooks(before::Vector{Int}, skipped::Vector{Symbol})
     hooks = Any[]
     for (i, pool) in enumerate(COUNTED_POOLS)
         pool.park === nothing && continue
         now = _effective_budget(pool.name, SAVED[i])
-        if now < before[i] && !_partial_limit_open(pool.name)
+        now < before[i] || continue
+        if _partial_limit_open(pool.name)
+            push!(skipped, pool.name)
+        else
             push!(hooks, pool.park)
         end
     end
     return hooks
+end
+
+# Debug-log the names in `exclude`/`only` that no library is registered under. They are
+# legal, since the library may register later, but a typo would otherwise go unnoticed.
+@noinline function _debug_unknown_names(exclude::Tuple, only)
+    registered = POOL_NAMES[]
+    for name in (exclude..., something(only, ())...)
+        name in registered ||
+            @debug "No pool named $(repr(name)) is registered; `exclude`/`only` ignores the name until a library registers under it."
+    end
+    return nothing
 end
 
 @noinline function _run_park_hooks(hooks::Vector{Any})
