@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 This release reshapes the public API around scopes that disable, enable or limit inner
 threading, and replaces the four registration functions with one. Old names are removed
