@@ -46,7 +46,14 @@ are internal now. Use `thread_pool_info()` instead of reading the registry's int
 ### Added
 
 - `thread_pool_info()`: every registered library with its controls and its current,
-  unrestricted and effective thread counts.
+  unrestricted and effective thread counts; `thread_pool_info(name)` gives the entry of one
+  library, or `nothing` if none is registered under that name.
+- The `exclude` and `only` keywords of every scope function take a single name or any
+  collection of names (`exclude = :polyester`, `only = [:blas, :mkl]`), not only a tuple.
+  An element that is not a `Symbol` throws an `ArgumentError`.
+- `@budgeted_threads` and `@budgeted_batch` pass every argument before the loop other than
+  `threads =` to the macro they emit, so a `Threads.@threads` schedule or `@batch` options
+  combine with the switch (`@budgeted_batch minbatch = 64 threads = flag for ...`).
 - Requests a scope cannot act on (an unknown `exclude`/`only`/`thread_limit` name, a count
   below 1, a held-back `park` hook, and similar) are logged at the `Debug` level; enable
   them with `ENV["JULIA_DEBUG"] = "NestedThreading"`.
