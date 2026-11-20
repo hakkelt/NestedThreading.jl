@@ -173,7 +173,8 @@ end
     @budgeted <parallel-loop>
 
 Wrap an already-chosen parallel loop so that its body runs with inner threaded libraries
-limited to `budget_for(range)` threads. The loop construct is emitted unchanged — this
+limited to `max(1, capacity() ÷ length(range))` threads, or 1 for an iterator of unknown
+length (see [`NestedThreading.capacity`](@ref)). The loop construct is emitted unchanged — this
 macro never decides *whether* to parallelize, only what budget the workers get.
 
 ```julia
@@ -210,7 +211,8 @@ switch for whether to parallelize at all.
 `@budgeted_threads :static threads = flag for ...`.
 
 * `threads = true` (the default when omitted) runs `Threads.@threads` with the body's
-  inner libraries limited to `budget_for(range)`.
+  inner libraries limited to `max(1, capacity() ÷ length(range))` threads, or 1 for an
+  iterator of unknown length.
 * `threads = false` runs a plain sequential loop with inner libraries limited to a single
   thread, on the assumption that a caller who switched threading off did so because
   concurrency is happening somewhere else. The schedule does not apply to it.

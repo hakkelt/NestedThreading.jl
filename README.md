@@ -164,7 +164,7 @@ julia --project=test test/runtests.jl :macros      # one tag
 julia --project=test test/runtests.jl :benchmark   # local-only timing comparisons
 ```
 
-Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:benchmark`. The
+Test items are tagged `:registry`, `:macros`, `:extensions`, `:jet`, `:aqua`, `:benchmark`. The
 benchmark items use BenchmarkTools with paired measurements and are excluded from the
 default run.
 

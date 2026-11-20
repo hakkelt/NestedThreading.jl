@@ -34,8 +34,9 @@ operator whose body contains another batched operator, or an NFFT operator const
 correctly without either site knowing about the other.
 
 A limit nested in an enclosing one that already holds every library it covers at or below its
-count is not entered at all: it could change nothing, so its body runs directly, without the
-lock round trip that otherwise makes a scope cost microseconds. "Enclosing" means opened on the
+count is not entered at all: it could change nothing, so its body runs directly, without
+entering and exiting a scope, setting every library and running the guards, which is what
+otherwise makes a scope cost microseconds. Checking that still takes the registry lock once. "Enclosing" means opened on the
 same task, or on a task it was spawned from while the scope was open, such as a
 [`@budgeted_threads`](@ref) worker. [`NestedThreading.thread_limit`](@ref) reports the
 same enclosing limit for one library.

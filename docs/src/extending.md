@@ -94,9 +94,14 @@ workers passes both in the same call, as the PolyesterWeave extension does:
 NestedThreading.register_pool!(:mylib; guard = _guard, quiesce = MyLib.park_workers!)
 ```
 
-The hook takes no arguments, has no paired restore, and must be cheap: the Polyester one is
-`ThreadingUtilities.sleep_all_tasks()` at about 0.1 µs, and re-waking the workers for the next
-`@batch` costs nothing measurable. A library whose workers park themselves promptly needs no
+The hook takes no arguments, has no paired restore, and must be cheap: the Polyester one
+takes about 0.1 µs, and re-waking the workers for the next `@batch` costs nothing measurable.
+It must also be safe while another task is using the library, since a quiesce runs whenever
+any task opens a region. The Polyester hook reserves the workers that are free, parks those,
+and releases them again, so a worker that some `@batch` holds is left alone. Parking every
+worker unconditionally, as `ThreadingUtilities.sleep_all_tasks()` does, is not safe: a worker
+that has just been handed another task's `@batch` chunk runs the park request instead, and
+that chunk is never computed. A library whose workers park themselves promptly needs no
 `quiesce` hook.
 
 ## Parking

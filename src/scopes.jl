@@ -27,8 +27,9 @@ restriction that applies to that pool (see `exclude`/`only` below), so
   the first entry and restored on the last exit.
 * a limit nested in an enclosing one -- on the same task, or on a task spawned inside it,
   such as a [`@budgeted_threads`](@ref) worker -- that already holds every pool it covers at
-  or below `n` is not entered: it could change nothing, so `f()` runs directly, without the
-  lock round trip and pool updates that make a scope cost microseconds. A scope open on an
+  or below `n` is not entered: it could change nothing, so `f()` runs directly, without
+  entering and exiting a scope, setting every pool and running the guards, which is what
+  makes a scope cost microseconds. Checking that still takes the registry lock once. A scope open on an
   unrelated task never counts. This relies on the enclosing scope outliving `f()`, which a
   task spawned inside a scope and never waited for does not guarantee. Julia 1.11 and later
   only; on 1.10 every scope is entered.
@@ -164,7 +165,7 @@ a request.
 with_thread_default(1; only = (:blas,)) do     # small BLAS calls: serial
     for iteration in 1:100
         axpy!(a, x, y)                          # BLAS at 1 thread
-        with_thread_grant(capacity(); only = (:blas,)) do
+        with_thread_grant(NestedThreading.capacity(); only = (:blas,)) do
             svd!(big)                           # BLAS at every thread
         end
     end
