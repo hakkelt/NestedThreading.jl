@@ -8,6 +8,16 @@ import NFFT
 # snapshot/restore in the registry instead of having each scope save and restore the global
 # itself (which is precisely the interleaving bug this package fixes).
 #
+# `_use_threads` is not public NFFT API; this extension depends on it because NFFT offers no
+# public way to switch its threading. What driving it buys, measured on an AMD EPYC (64 cores),
+# Julia 1.13.1, NFFT 0.14.3, 2026-11-20, for a 256² image and a 256-spoke radial trajectory
+# with 512 samples per spoke (median of 7 paired measurements, forward / adjoint):
+#
+#   switching it on for a single call (`with_threads_enabled`)    -t 8   2.7x / 3.4x faster
+#                                                                 -t 60  3.4x / 2.5x faster
+#   switching it off inside a saturated `Threads.@threads` loop    -t 8   1.07x / 1.04x faster
+#                                                                 -t 60  no difference
+#
 # The mapping is deliberately all-or-nothing — NFFT has no partial thread count, so it is
 # enabled only when nothing is restricting the process at all.
 #
