@@ -170,7 +170,9 @@ end
     NT.with_thread_limit(1) do
         nothing
     end
-    @test late_guarded[] == 1
+    # A guard runs only under a limit below `capacity()`, which a limit of 1 is not when
+    # `capacity() == 1`.
+    @test late_guarded[] == (NT.capacity() > 1 ? 1 : 0)
 
     # A `set` that throws while a scope is open fails the registration and records nothing:
     # the name stays free.
