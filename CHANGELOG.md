@@ -42,6 +42,10 @@ are internal now. Use `thread_pool_info()` instead of reading the registry's int
   be a silent no-op.
 - `thread_limit(name)` returns `nothing` instead of `typemax(Int)` when no enclosing limit
   applies, and always on Julia 1.10.
+- The loop macros call the `quiesce` hooks of every pool except Polyester's around a
+  `Polyester.@batch` loop too; they used to skip all of them there.
+- `@budgeted_threads` rejects a keyword option such as `thread = true` itself, naming the
+  `threads = <Bool>` switch, instead of passing it on to `Threads.@threads`.
 
 ### Added
 
@@ -62,3 +66,12 @@ are internal now. Use `thread_pool_info()` instead of reading the registry's int
 
 - Registering a guard while a scope was open could raise a `BoundsError` when that scope
   closed.
+- A registered `get`, `set` or `park` hook that throws no longer leaves the registry
+  half-updated (a scope entry left open, later pools not restored, park hooks not run) or
+  replaces the scope body's result. The hook is skipped, the first failure of each pool is
+  logged with `@warn` and later ones at the `Debug` level, and `thread_pool_info` reports
+  a count whose `get` throws as `nothing`.
+- `register_pool!` called while a scope is open registers nothing when the new pool's
+  `set` throws.
+- Registering a `quiesce` hook while another task runs a budgeted loop no longer races with
+  that loop's call to the hooks.
