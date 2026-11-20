@@ -343,3 +343,41 @@ end
     end
     @test Probe.quiesce_count() == 4
 end
+
+@testitem "generic axes: loop macros over offset and view ranges" tags = [:macros] begin
+    using NestedThreading, OffsetArrays, Polyester
+    const NT = NestedThreading
+
+    x = collect(1.0:10.0)
+    @testset "$name" for (name, a) in
+        (("offset", OffsetArray(x, -3)), ("view", view(x, 2:9)))
+        @test NT.budget_for(a) == NT.budget_for(collect(a))
+
+        # Every index is visited exactly once, keyed by the array's own indices.
+        for mk in (:threads, :batch)
+            hits = OffsetArray(zeros(Int, length(a)), axes(a))
+            if mk === :threads
+                @budgeted_threads for i in eachindex(a)
+                    hits[i] += 1
+                end
+            else
+                @budgeted_batch for i in eachindex(a)
+                    hits[i] += 1
+                end
+            end
+            @test all(==(1), hits)
+        end
+
+        # Iterating the values directly sees every element.
+        s = Threads.Atomic{Float64}(0.0)
+        @budgeted_threads for v in a
+            Threads.atomic_add!(s, v)
+        end
+        @test s[] == sum(a)
+        s[] = 0.0
+        @budgeted_batch for v in a
+            Threads.atomic_add!(s, v)
+        end
+        @test s[] == sum(a)
+    end
+end
