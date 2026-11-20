@@ -187,7 +187,8 @@ Accepts any chain of macros ending in a single `for x in range` loop, so
 `Threads.@threads :static for`, `@inbounds Polyester.@batch for`, and
 `@batch minbatch=64 for` all work. The range expression is hoisted into a temporary and
 evaluated exactly once. A chain containing `@batch` automatically excludes the `:polyester`
-pool, since there the loop being budgeted is itself the Polyester consumer.
+pool, since there the loop being budgeted is itself the Polyester consumer. The expression
+evaluates to `nothing`.
 
 See also [`@budgeted_threads`](@ref), [`@budgeted_batch`](@ref).
 """
@@ -207,8 +208,10 @@ end
 `Threads.@threads` over `range` with an automatic inner thread budget, plus a runtime
 switch for whether to parallelize at all.
 
-`schedule` (`:dynamic`, `:static` or `:greedy`) is passed to `Threads.@threads` as is:
-`@budgeted_threads :static threads = flag for ...`.
+Every argument before the loop other than `threads = ...` is passed to `Threads.@threads`
+unchanged and in order; in practice that is the schedule (`:dynamic`, `:static` or
+`:greedy`): `@budgeted_threads :static threads = flag for ...`. Any other `name = value`
+option is an error at expansion, since `Threads.@threads` takes no keyword options.
 
 * `threads = true` (the default when omitted) runs `Threads.@threads` with the body's
   inner libraries limited to `max(1, capacity() ÷ length(range))` threads, or 1 for an
@@ -222,7 +225,37 @@ emitted `Threads.@threads`. A macro that parallelizes the loop itself (`Threads.
 `Polyester.@batch`, `@distributed`, …) is rejected at expansion, since this macro emits one
 already — use [`@budgeted`](@ref) to budget a parallel loop you have written yourself.
 `@budgeted` is also the way to combine this with a macro that insists on being handed a
-bare `for` loop, such as `@simd`.
+bare `for` loop, such as `@simd`. The expression evaluates to `nothing`.
+
+```jldoctest
+julia> squares = zeros(Int, 4);
+
+julia> @budgeted_threads :static for i in 1:4
+           squares[i] = i^2
+       end
+
+julia> squares
+4-element Vector{Int64}:
+  1
+  4
+  9
+ 16
+
+julia> parallel = false;
+
+julia> limits = zeros(Int, 4);
+
+julia> @budgeted_threads threads = parallel for i in 1:4
+           limits[i] = NestedThreading.thread_limit(:blas)   # the inner budget
+       end
+
+julia> limits
+4-element Vector{Int64}:
+ 1
+ 1
+ 1
+ 1
+```
 """
 macro budgeted_threads(args...)
     cond, options, ex = _parse_switched(args, "@budgeted_threads")
@@ -260,7 +293,22 @@ expansion emits `Polyester.@batch`. The `:polyester` pool is excluded from the b
 so that the generated `@batch` loop is not disabled by its own restriction.
 
 As with [`@budgeted_threads`](@ref), a chain that already parallelizes the loop is rejected
-at expansion.
+at expansion. The expression evaluates to `nothing`.
+
+```jldoctest
+julia> import Polyester
+
+julia> total = Threads.Atomic{Int}(0);
+
+julia> parallel = true;
+
+julia> @budgeted_batch minbatch = 2 threads = parallel for i in 1:8
+           Threads.atomic_add!(total, i)
+       end
+
+julia> total[]
+36
+```
 """
 macro budgeted_batch(args...)
     cond, options, ex = _parse_switched(args, "@budgeted_batch")

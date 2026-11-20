@@ -177,8 +177,9 @@ end
 """
     capacity() -> Int
 
-The number of worker threads a parallel loop is assumed to be able to occupy. Used as the
-numerator of the automatic budget arithmetic and as the "unrestricted" reference value.
+Return the number of worker threads a parallel loop is assumed to be able to occupy. The
+loop macros divide it among their workers, and scopes treat a limit of `capacity()` as
+unrestricted.
 
 Defined as `Threads.threadpoolsize()`. This is exact for `Threads.@threads` and an
 approximation for Polyester's `@batch`; it is a single function so that assumption lives
@@ -217,15 +218,18 @@ The keywords are the controls a library can have; pass the ones it has:
   this library's count, to make the workers it no longer uses release the cores they are
   spinning on. Needs `get`/`set`. See "Parking" below.
 
-A hook that throws once registered is not fatal. When a `get`, `set`, `park` or `quiesce`
-call throws, it is skipped: every other pool is still set, restored, parked and quiesced, the
-scope's bookkeeping stays consistent, and the scope returns its body's value or rethrows its
-body's exception as if nothing had happened. A count whose `get` throws keeps the value it
-was last restored to. A `guard` that throws before calling `f`, or returns without calling
-it, is skipped and `f()` runs without it; one that throws after `f()` has returned still
-gives back `f()`'s value; and when `f()` itself throws, that exception is what propagates,
-whatever the guard throws while unwinding. The first failure of each pool is logged with
-`@warn`, later ones at debug level.
+A library that offers only a scoped switch registers a `guard`; one whose idle workers hold
+on to Julia's threads or to cores adds `quiesce` or `park`:
+
+```julia
+NestedThreading.register_pool!(:mylib; guard = (f, n) -> MyLib.with_workers(f, n),
+                               quiesce = MyLib.release_idle_workers)
+NestedThreading.register_pool!(:myblas; get = MyBLAS.get_threads, set = MyBLAS.set_threads,
+                               park = MyBLAS.stop_idle_workers)
+```
+
+Return `nothing`. A hook that throws later, during a scope, is not fatal; see "Hooks that
+throw" below.
 
 Registration is checked strictly. It throws an `ArgumentError` for a `name` that is already
 registered, for `get` without `set` or `set` without `get`, for `park` without `get`/`set`,
@@ -262,12 +266,25 @@ use it.
 
 A guard must act for the whole process while it is held, not only for the calling task:
 Polyester's reserves its workers, which every task then finds taken. A hard limit nested in
-one that already covers this library does not call the guard again (see `_limit_in_force`),
-so the enclosing scope's guard is all that restricts a nested call on another task.
+one that already covers this library does not call the guard again (see
+[`with_thread_limit`](@ref)), so the enclosing scope's guard is all that restricts a nested
+call on another task.
 
 The guard receives an arbitrary caller closure, whose type is not known until the call
 site, so one runtime dispatch per guarded scope is inherent. It happens once per scope, not
 once per loop iteration.
+
+## Hooks that throw
+
+A hook that throws once registered is not fatal. When a `get`, `set`, `park` or `quiesce`
+call throws, it is skipped: every other pool is still set, restored, parked and quiesced, the
+scope's bookkeeping stays consistent, and the scope returns its body's value or rethrows its
+body's exception as if nothing had happened. A count whose `get` throws keeps the value it
+was last restored to. A `guard` that throws before calling `f`, or returns without calling
+it, is skipped and `f()` runs without it; one that throws after `f()` has returned still
+gives back `f()`'s value; and when `f()` itself throws, that exception is what propagates,
+whatever the guard throws while unwinding. The first failure of each pool is logged with
+`@warn`, later ones at debug level.
 
 ## Quiescing
 
@@ -389,11 +406,24 @@ end
     quiesce_foreign_pools()
 
 Call every registered `quiesce` hook (see [`register_pool!`](@ref)), so that a region
-about to be opened on Julia's own scheduler can actually use Julia's worker threads.
+about to be opened on Julia's own scheduler can actually use Julia's worker threads. Return
+`nothing`.
 
 The loop macros call this for themselves. Around a `Polyester.@batch` loop they skip only
-Polyester's own hook, since there the Polyester pool *is* the loop. Call it directly before a hand-written `Threads.@threads` or `@spawn` region that does not go
-through those macros.
+Polyester's own hook, since there the Polyester pool *is* the loop. Call it directly before
+a hand-written `Threads.@threads` or `@spawn` region that does not go through those macros:
+
+```julia
+import Polyester
+
+Polyester.@batch for i in eachindex(a)
+    a[i] = f(a[i])
+end
+NestedThreading.quiesce_foreign_pools()   # Polyester's spinning workers let go of the threads
+Threads.@threads for i in eachindex(b)
+    b[i] = g(b[i])
+end
+```
 
 It is a plain call with no paired restore, costs about 0.1 µs with Polyester loaded, and is a
 no-op when nothing is registered. It is safe to call when no foreign region has run: parked
@@ -440,9 +470,9 @@ only the library registered as `name`. Each has these fields:
 * `effective`: the count the open scopes apply to it, or `current` when none is open.
 
 The three counts are `Int`s, or `nothing` for a library without `get`/`set`. `current` is
-also `nothing` when `get()` throws (see [`register_pool!`](@ref)), and so are `unrestricted`
-and `effective` if no scope is open then. The result is a
-snapshot taken under the registry lock; it does not change as scopes open and close.
+also `nothing` when `get()` throws (see [`register_pool!`](@ref)), and so are
+`unrestricted` and `effective` if no scope is open then. The result is a snapshot taken
+under the registry lock; it does not change as scopes open and close.
 
 `thread_pool_info(name)` returns `nothing` for a name no library has registered (logged at
 debug level), so a caller can ask about a library whose package may not be loaded.
@@ -693,11 +723,13 @@ end
 """
     thread_limit(name::Symbol) -> Union{Int,Nothing}
 
-The hard limit the scopes enclosing the calling task put on pool `name`: the smallest `n`
-among the [`with_thread_limit`](@ref) scopes (and so [`with_threads_disabled`](@ref), a
-limit of 1) that apply to it and that this task runs inside -- opened by it, or by a task it
-was spawned from while the scope was open -- or `nothing` when there is none. A scope
-open on an unrelated task does not count: it may close at any moment.
+Return the hard limit the scopes enclosing the calling task put on pool `name`: the
+smallest `n` among the [`with_thread_limit`](@ref) scopes (and so
+[`with_threads_disabled`](@ref), a limit of 1) that apply to it and that this task runs
+inside -- opened by it, or by a task it was spawned from while the scope was open -- or
+`nothing` when there is none. A scope open on an unrelated task does not count: it may
+close at any moment. Polyester's workers are such tasks, so inside a `Polyester.@batch`
+body this reports `nothing` on every worker except the calling task.
 
 Soft defaults ([`with_thread_default`](@ref)) and grants ([`with_thread_grant`](@ref)) are not
 counted, since neither bounds the count. The name does not have to be registered.
@@ -708,6 +740,16 @@ that pool alone is in force, say.
 
 On Julia 1.10, which has no `ScopedValue`, enclosing scopes are not tracked and this always
 returns `nothing`: a caller that acts on it then enters its scope, as it would anyway.
+
+```jldoctest
+julia> NestedThreading.thread_limit(:blas) === nothing   # no scope open
+true
+
+julia> with_thread_limit(2; exclude = :polyester) do
+           NestedThreading.thread_limit(:blas), NestedThreading.thread_limit(:polyester)
+       end
+(2, nothing)
+```
 """
 function thread_limit(name::Symbol)
     name in POOL_NAMES[] ||

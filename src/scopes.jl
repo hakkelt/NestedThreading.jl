@@ -61,47 +61,73 @@ end
 """
     with_thread_limit(f, n::Integer; exclude = (), only = nothing)
 
-Run `f()` with every registered threaded library limited to `n` threads, restoring the
-previous state afterwards (also on exception). Returns `f()`'s value.
+Run `f()` with every registered threaded library limited to `n` threads, and restore the
+previous state afterwards, also when `f()` throws. Return `f()`'s value. An `n` below 1
+is raised to 1.
 
-The limit actually applied to a pool is the `minimum` over every *currently-active*
-restriction that applies to that pool (see `exclude`/`only` below), so
+The limit applied to a pool is the minimum over every restriction currently active in the
+process that applies to that pool, so
 
-* nesting can only ever narrow, never widen, an outer restriction — an inner
+* nesting can only narrow an outer restriction, never widen it: an inner
   `with_thread_limit(f, 8)` inside an outer `with_thread_limit(g, 1)` still runs at 1;
-* concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted on
-  the first entry and restored on the last exit.
-* a limit nested in an enclosing one -- on the same task, or on a task spawned inside it,
-  such as a [`@budgeted_threads`](@ref) worker -- that already holds every pool it covers at
-  or below `n` is not entered: it could change nothing, so `f()` runs directly, without
-  entering and exiting a scope, setting every pool and running the guards, which is what
-  makes a scope cost microseconds. Checking that still takes the registry lock once. A scope open on an
-  unrelated task never counts. This relies on the enclosing scope outliving `f()`, which a
-  task spawned inside a scope and never waited for does not guarantee. Julia 1.11 and later
-  only; on 1.10 every scope is entered.
+* concurrent scopes cannot corrupt each other's bookkeeping: the counts are snapshotted
+  when the first scope opens and restored when the last one closes.
 
 By default a restriction applies to every registered pool, thread counts and guards alike
 (see [`register_pool!`](@ref)). Two keywords narrow that:
 
-* `exclude`: a denylist of pool names this restriction does not apply to. Naming a pool
-  leaves its thread count and its guard alone. Naming a pool that is not currently registered at all is not an error: a
-  caller may exclude a pool whose package is not loaded in this session.
-* `only`: an allowlist — when given, this restriction applies to *only* these pools and
-  none else, leaving everything unnamed alone entirely (not merely unrestricted-by-this-
-  scope: if no other active scope restricts it either, it keeps its pre-scope value even
-  past this scope's own limit). This is what a call site that wants, say, serial BLAS
-  needs: "restrict exactly these pools" is not expressible as a denylist without enumerating every
-  other pool, which breaks whenever a new one registers.
+* `exclude`: pool names this restriction does not apply to. Naming a pool leaves its thread
+  count and its guard alone. A name no pool has registered is not an error, so a caller may
+  exclude a pool whose package is not loaded in this session.
+* `only`: when given, the restriction applies to these pools and no others. A pool left
+  out is left alone entirely: unless another active scope restricts it, it keeps the value
+  it had before this scope opened, even when that is above this scope's limit. This is how
+  a call site asks for, say, serial BLAS; a denylist would have to name every other pool
+  and would miss any registered later.
 
 Each takes a single pool name or a collection of them: `exclude = :polyester`,
 `only = (:blas, :mkl)` and `only = [:blas, :mkl]` all work. An element that is not a
 `Symbol` throws an `ArgumentError`.
 
-Guards are invoked only when the limit applying to them is below
-[`capacity`](@ref), and receive that limit. Polyester's guard switches it off outright
-rather than limiting it proportionally — a partial limit was tried and measured far worse
-in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref) uses
-`exclude = (:polyester,)` because there the outer loop *is* the Polyester consumer.
+```jldoctest
+julia> using LinearAlgebra
+
+julia> with_thread_limit(1; only = :blas) do
+           BLAS.get_num_threads()
+       end
+1
+
+julia> with_thread_limit(1) do
+           with_thread_limit(8) do    # nesting only narrows
+               BLAS.get_num_threads()
+           end
+       end
+1
+```
+
+See also [`with_threads_disabled`](@ref), [`with_threads_enabled`](@ref),
+[`with_thread_default`](@ref), [`thread_limit`](@ref).
+
+# Extended help
+
+## Nested limits that change nothing
+
+A limit nested in an enclosing one, on the same task or on a task spawned inside it (such
+as a [`@budgeted_threads`](@ref) worker), that already holds every pool it covers at or
+below `n` is not entered: it could change nothing, so `f()` runs directly, without setting
+the pools or running the guards, which keeps such a scope to microseconds. The check still
+takes the registry lock once. A scope open on an unrelated task never counts. The check
+relies on the enclosing scope outliving `f()`, which a task spawned inside a scope and
+never waited for does not guarantee. It needs `ScopedValue` (Julia 1.11 and later); on
+Julia 1.10 every scope is entered.
+
+## Guards
+
+Guards are invoked only when the limit that applies to them is below [`capacity`](@ref),
+and they receive that limit. Polyester's guard switches Polyester off entirely rather than
+limiting it proportionally, because a partial limit measured far worse in the saturated
+regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref) uses
+`exclude = (:polyester,)` because there the outer loop is itself the Polyester consumer.
 
 !!! note "Guards are decided once, at entry"
     Counted pools follow the applied minimum for as long as the scope is open — another
@@ -137,8 +163,6 @@ in the saturated regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref)
     restricted, unrelated concurrent tasks are restricted too. That never oversubscribes,
     but it does mean a long-lived restricted scope throttles the whole process. This is a
     limitation of the underlying C libraries, not something this package can solve.
-
-See also [`with_threads_disabled`](@ref), [`with_threads_enabled`](@ref).
 """
 function with_thread_limit(
     f::F, n::Integer; exclude = (), only = nothing
@@ -202,12 +226,15 @@ too small to benefit from its threads, but some of which are not. A hard
 [`with_thread_limit`](@ref) cannot express that: nothing nested inside it can widen past it,
 so the few large calls would run serial too.
 
-Soft defaults combine with each other by minimum, and yield to a grant. They do not yield to
-nothing else: a hard limit open around or inside a soft default still clamps it, and a soft
-default of `n` below a hard limit of `m > n` runs at `n`, since the limit is a ceiling and not
-a request.
+Soft defaults combine with each other by minimum and yield only to a grant: a hard limit
+open around or inside a soft default still clamps it, and a soft default of `n` below a
+hard limit of `m > n` runs at `n`, since the limit is a ceiling and not a request.
 
 ```julia
+using LinearAlgebra
+a, x, y = 2.0, rand(1000), rand(1000)
+big = rand(2000, 2000)
+
 with_thread_default(1; only = (:blas,)) do     # small BLAS calls: serial
     for iteration in 1:100
         axpy!(a, x, y)                          # BLAS at 1 thread
@@ -236,17 +263,31 @@ enough to be worth threading. Returns `f()`'s value.
 A grant overrides soft defaults but never a hard limit: inside a
 [`with_thread_limit`](@ref)`(g, 1)` — a worker of a saturated outer parallel loop, say — a
 grant does nothing. It also never raises a pool past the count the process runs it at when
-no scope is open: it restores threading that a soft default took away, it does not add
-threads a caller turned off by hand with, e.g., `BLAS.set_num_threads(1)`. Several grants open
-at once combine by maximum.
+no scope is open: it restores threading that a soft default took away, but it does not add
+threads a caller turned off by hand with, e.g., `BLAS.set_num_threads(1)`. Several grants
+open at once combine by maximum.
 
 When a grant closes and a pool's count goes down as a result, the pool's `park` hook runs
-(see [`register_pool!`](@ref)), so that a library whose idle workers would otherwise go on spinning
-(OpenBLAS) releases them. That costs something (about a millisecond for OpenBLAS, counting
-the pool's restart at the next grant), so a grant belongs around a call that is worth
-several milliseconds, not around a small one. Decide whether a call is large enough
-*before* opening the scope rather than opening one per call and letting it do nothing: opening a scope costs a lock and a pass over
-the registry either way.
+(see [`register_pool!`](@ref)), so that a library whose idle workers would otherwise go on
+spinning (OpenBLAS) releases them. That costs about a millisecond for OpenBLAS, counting the
+pool's restart at the next grant, so a grant belongs around a call worth several
+milliseconds. Decide whether a call is that large *before* opening the scope: a scope that
+ends up doing nothing still costs a lock and a pass over the registry.
+
+```julia
+using LinearAlgebra
+matrices = [rand(n, n) for n in (50, 2000, 80)]
+
+with_thread_default(1; only = :blas) do
+    for A in matrices
+        if size(A, 1) >= 1000                  # large enough to be worth threading
+            with_thread_grant(() -> svd!(A), NestedThreading.capacity(); only = :blas)
+        else
+            svd!(A)
+        end
+    end
+end
+```
 
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
@@ -259,9 +300,10 @@ end
 """
     with_threads_disabled(f; exclude = (), only = nothing)
 
-Run `f()` with every registered threaded library limited to a single thread. Equivalent to
-`with_thread_limit(f, 1)`. Use at call sites that are not a plain `for` loop — a
-`@sync`/`@spawn` block, or a single call gated on a `Bool` field.
+Run `f()` with every registered threaded library limited to a single thread and return
+`f()`'s value. Equivalent to `with_thread_limit(f, 1; exclude, only)`; see
+[`with_thread_limit`](@ref) for `exclude` and `only`. Use at call sites that are not a
+plain `for` loop — a `@sync`/`@spawn` block, or a single call gated on a `Bool` field.
 """
 with_threads_disabled(f::F; exclude = (), only = nothing) where {F} =
     with_thread_limit(f, 1; exclude, only)
@@ -269,15 +311,17 @@ with_threads_disabled(f::F; exclude = (), only = nothing) where {F} =
 """
     with_threads_enabled(f; exclude = (), only = nothing)
 
-Run `f()` with every registered thread count at [`capacity`](@ref). The scope adds no guard
-of its own; a guard runs only if another open restriction lowers the limit below
-`capacity()` at entry. Unlike a plain unwrapped call this actively raises the counts, so it turns on a library that
-defaults to off (it sets `NFFT._use_threads[] = true`, for instance), which is what a call
-site with an explicit `threaded = true` switch needs. Equivalent to
-`with_thread_limit(f, capacity())`.
+Run `f()` with every registered thread count set to [`capacity`](@ref) and return `f()`'s
+value. Equivalent to `with_thread_limit(f, capacity(); exclude, only)`; see
+[`with_thread_limit`](@ref) for `exclude` and `only`.
 
-Still clamped by any outer restriction, so calling it inside a saturated batch loop is
-safe and does nothing.
+Calling `f()` without any scope leaves each count where it is; this scope raises the counts,
+so it turns on a library that defaults to off (it sets `NFFT._use_threads[] = true`, for
+instance). That is what a call site with an explicit `threaded = true` switch needs.
+
+Any outer restriction still clamps it, so calling it inside a saturated batch loop is safe
+and does nothing. Since its limit is `capacity()`, it never calls a guard itself; a guard
+runs only when another open restriction holds the limit below `capacity()` at entry.
 """
 with_threads_enabled(f::F; exclude = (), only = nothing) where {F} =
     with_thread_limit(f, capacity(); exclude, only)
