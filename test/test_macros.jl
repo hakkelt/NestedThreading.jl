@@ -100,14 +100,24 @@ end
 
     expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
 
-    @test_throws Exception expand("@budgeted Threads.@threads 1 + 1")
-    @test_throws Exception expand("@budgeted_threads while true; break; end")
+    @test_throws "expected a `for` loop, optionally wrapped in macros, got" expand(
+        "@budgeted Threads.@threads 1 + 1"
+    )
+    @test_throws "`@budgeted_threads` expected a `for` loop" expand(
+        "@budgeted_threads while true; break; end"
+    )
     # Multiple iteration specs have an ambiguous trip count.
-    @test_throws Exception expand("@budgeted_threads for i in 1:2, j in 1:2; nothing; end")
+    @test_throws "only a single `for x in range` iteration spec is supported" expand(
+        "@budgeted_threads for i in 1:2, j in 1:2; nothing; end"
+    )
     # `@budgeted` needs a loop *construct*; a bare `for` would silently be sequential.
-    @test_throws Exception expand("@budgeted for i in 1:2; nothing; end")
+    @test_throws "`@budgeted` expects a parallel loop construct" expand(
+        "@budgeted for i in 1:2; nothing; end"
+    )
     # An unrecognised keyword argument is an error, not silently ignored.
-    @test_throws Exception expand("@budgeted_threads thread = true for i in 1:2; nothing; end")
+    @test_throws "the switch is `threads = <Bool>`" expand(
+        "@budgeted_threads thread = true for i in 1:2; nothing; end"
+    )
 
     # ...and the well-formed shapes do expand.
     @test expand("@budgeted Threads.@threads for i in 1:2; nothing; end") isa Expr
@@ -162,8 +172,12 @@ end
 
     # An option the emitted macro does not know is rejected by it, at expansion.
     full(str) = macroexpand(@__MODULE__, Meta.parse(str))
-    @test_throws Exception full("@budgeted_threads :nonsense for i in 1:2; nothing; end")
-    @test_throws Exception full("@budgeted_threads thread = true for i in 1:2; nothing; end")
+    @test_throws "unsupported schedule argument" full(
+        "@budgeted_threads :nonsense for i in 1:2; nothing; end"
+    )
+    @test_throws "the switch is `threads = <Bool>`" full(
+        "@budgeted_threads thread = true for i in 1:2; nothing; end"
+    )
     # The loop comes last.
     @test_throws "expects the loop last" expand(
         "@budgeted_threads for i in 1:2; nothing; end :static"
@@ -181,13 +195,6 @@ end
     end
 
     expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
-    # The error is thrown during expansion, so it arrives wrapped in a LoadError.
-    message(str) = sprint(showerror, try
-            expand(str)
-            nothing
-        catch err
-            err
-        end)
 
     # `@budgeted_threads` emits `Threads.@threads` itself, so a chain containing another
     # parallel loop macro would parallelize the same loop twice — `@budgeted_threads
@@ -200,9 +207,10 @@ end
             "@budgeted_batch Threads.@threads for i in 1:2; nothing; end",
             "@budgeted_threads threads = false @distributed for i in 1:2; nothing; end",
         )
-        @test_throws Exception expand(str)
         # The message points at the fix rather than just failing.
-        @test occursin("@budgeted", message(str))
+        @test_throws r"emits `[^`]+` itself, but the loop is already wrapped in .*Use `@budgeted " expand(
+            str
+        )
     end
 
     # Body-level macros distribute no iterations and are still accepted. (`@simd` is not

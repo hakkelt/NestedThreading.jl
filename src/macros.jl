@@ -226,6 +226,13 @@ bare `for` loop, such as `@simd`.
 """
 macro budgeted_threads(args...)
     cond, options, ex = _parse_switched(args, "@budgeted_threads")
+    for option in options
+        option isa Expr && option.head === :(=) && error(
+            "NestedThreading: `@budgeted_threads` got the option `$option`, but " *
+                "`Threads.@threads` takes no keyword options; the switch is " *
+                "`threads = <Bool>`."
+        )
+    end
     chain, loop = _peel_macros(ex)
     _reject_parallel_chain(chain, "@budgeted_threads", "Threads.@threads")
     mk = body -> Expr(
