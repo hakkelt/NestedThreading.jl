@@ -36,6 +36,10 @@ are internal now. Use `thread_pool_info()` instead of reading the registry's int
 
 ### Changed
 
+- The Polyester extension is `NestedThreadingPolyesterWeaveExt`, loaded by `ManualMemory`,
+  `PolyesterWeave` and `ThreadingUtilities` instead of `Polyester`, so it also loads in
+  sessions that use only `LoopVectorization.@tturbo` or Octavian, and restricts them too.
+  The pool keeps the name `:polyester`.
 - `register_pool!` throws an `ArgumentError` for a name that is already registered, for
   `get` without `set` or the reverse, for `park` without `get`/`set`, for no control at
   all, and when `get()` does not return an `Integer`. Registering a duplicate name used to
