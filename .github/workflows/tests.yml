@@ -50,10 +50,9 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
-  # `capacity() == 1` collapses "restricted" and "unrestricted" onto the same count, which
-  # is a genuinely different code path for every all-or-nothing pool — it is where the NFFT
-  # boolean mapping was found not to round-trip. The main matrix runs at 4 threads, so this
-  # regime needs a job of its own.
+  # At `capacity() == 1` "restricted" and "unrestricted" are the same count, which takes a
+  # different code path in every all-or-nothing pool (the NFFT on/off mapping must still
+  # round-trip). The main matrix runs at 4 threads, so this case needs a job of its own.
   single-thread:
     name: Single-threaded session
     runs-on: ubuntu-latest
