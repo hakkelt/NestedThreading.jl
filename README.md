@@ -104,6 +104,35 @@ When Julia uses every core, the unbudgeted loops are 846x and 82x slower. With c
 spare, nesting costs little, and budgeting the Polyester loop makes it slower.
 The [design page](https://hakkelt.github.io/NestedThreading.jl/stable/design/) has the full table.
 
+Polyester's workers keep spinning on Julia's threads for a while after a `@batch` loop ends,
+and a `Threads.@threads` loop started in that window waits for them. The budgeted macros
+release them first:
+
+```julia
+xs = rand(2^12)
+
+function side_by_side_plain!(xs)
+    Polyester.@batch for i in eachindex(xs)
+        xs[i] = sin(xs[i])
+    end
+    Threads.@threads for i in eachindex(xs)
+        xs[i] = cos(xs[i])
+    end
+end
+
+function side_by_side_budgeted!(xs)
+    @budgeted_batch for i in eachindex(xs)
+        xs[i] = sin(xs[i])
+    end
+    @budgeted_threads for i in eachindex(xs)
+        xs[i] = cos(xs[i])
+    end
+end
+
+@btime side_by_side_plain!($xs)          # -t 8: 70–130 µs
+@btime side_by_side_budgeted!($xs)       # -t 8: 35 µs
+```
+
 ## API
 
 | Function / macro | Purpose |
