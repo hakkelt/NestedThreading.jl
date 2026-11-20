@@ -9,7 +9,7 @@ import NFFT
 # itself (which is precisely the interleaving bug this package fixes).
 #
 # `_use_threads` is not public NFFT API; this extension depends on it because NFFT offers no
-# public way to switch its threading. What driving it buys, measured on an AMD EPYC (64 cores),
+# public way to switch its threading. What driving it buys, measured on 64 cores of an AMD EPYC 7763,
 # Julia 1.13.1, NFFT 0.14.3, 2026-11-20, for a 256² image and a 256-spoke radial trajectory
 # with 512 samples per spoke (median of 7 paired measurements, forward / adjoint):
 #
