@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><meta name="referrer" content="no-referrer"/><title>Home · NestedThreading.jl</title><meta name="title" content="Home · NestedThreading.jl"/><meta property="og:title" content="Home · NestedThreading.jl"/><meta property="twitter:title" content="Home · NestedThreading.jl"/><meta name="description" content="Documentation for NestedThreading.jl."/><meta property="og:description" content="Documentation for NestedThreading.jl."/><meta property="twitter:description" content="Documentation for NestedThreading.jl."/><script data-outdated-warner src="assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.63.2/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL="."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="assets/documenter.js"></script><script src="search_index.js"></script><script src="siteinfo.js"></script><script src="../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href>NestedThreading.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li class="is-active"><a class="tocitem" href>Home</a><ul class="internal"><li><a class="tocitem" href="#Installation"><span>Installation</span></a></li><li><a class="tocitem" href="#Quick-start"><span>Quick start</span></a></li><li><a class="tocitem" href="#Why-it-matters"><span>Why it matters</span></a></li><li><a class="tocitem" href="#Where-to-go-next"><span>Where to go next</span></a></li></ul></li><li><span class="tocitem">How-to guides</span><ul><li><a class="tocitem" href="guides/loops/">Budget a parallel loop</a></li><li><a class="tocitem" href="guides/scopes/">Restrict a call that is not a loop</a></li><li><a class="tocitem" href="guides/extending/">Register a library in NestedThreading</a></li></ul></li><li><a class="tocitem" href="design/">Design</a></li><li><span class="tocitem">Reference</span><ul><li><a class="tocitem" href="rules/">Composition rules</a></li><li><a class="tocitem" href="libraries/">Supported libraries</a></li><li><a class="tocitem" href="api/">API reference</a></li></ul></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Home</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Home</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/hakkelt/NestedThreading.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/hakkelt/NestedThreading.jl/blob/master/docs/src/index.md#" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="NestedThreading.jl"><a class="docs-heading-anchor" href="#NestedThreading.jl">NestedThreading.jl</a><a id="NestedThreading.jl-1"></a><a class="docs-heading-anchor-permalink" href="#NestedThreading.jl" title="Permalink"></a></h1><p>BLAS, FFTW, Polyester, NFFT and similar libraries each choose their own thread count. Called from inside a <code>Threads.@threads</code> loop that already uses every thread, each worker starts its own inner threads, and the machine runs far more threads than it has cores. NestedThreading limits the inner libraries for the duration of the outer loop, the way Python&#39;s <a href="https://github.com/joblib/threadpoolctl"><code>threadpoolctl</code></a> does.</p><h2 id="Installation"><a class="docs-heading-anchor" href="#Installation">Installation</a><a id="Installation-1"></a><a class="docs-heading-anchor-permalink" href="#Installation" title="Permalink"></a></h2><pre><code class="language-julia hljs">using Pkg
+Pkg.add(&quot;NestedThreading&quot;)</code></pre><p>Support for a library is loaded automatically when that library is loaded; see <a href="libraries/#Supported-libraries">Supported libraries</a>.</p><h2 id="Quick-start"><a class="docs-heading-anchor" href="#Quick-start">Quick start</a><a id="Quick-start-1"></a><a class="docs-heading-anchor-permalink" href="#Quick-start" title="Permalink"></a></h2><p>Replace <code>Threads.@threads</code> with <a href="api/#NestedThreading.@budgeted_threads"><code>@budgeted_threads</code></a>:</p><pre><code class="language-julia-repl hljs">julia&gt; using NestedThreading, LinearAlgebra
+
+julia&gt; A = rand(64, 64); X = rand(64, 32); Y = similar(X);
+
+julia&gt; @budgeted_threads for i in axes(X, 2)
+           mul!(view(Y, :, i), A, view(X, :, i))
+       end
+
+julia&gt; Y ≈ A * X
+true</code></pre><p>The loop has 32 iterations. On 8 threads each worker gets <code>max(1, 8 ÷ 32) = 1</code> thread, so BLAS runs single-threaded inside the loop. A loop of 2 iterations would give each worker 4 BLAS threads. The previous thread counts come back when the loop ends.</p><h2 id="Why-it-matters"><a class="docs-heading-anchor" href="#Why-it-matters">Why it matters</a><a id="Why-it-matters-1"></a><a class="docs-heading-anchor-permalink" href="#Why-it-matters" title="Permalink"></a></h2><p>Two loops that each run a threaded library inside <code>Threads.@threads</code>, timed with BenchmarkTools on a 48-core machine. The comments give the time at <code>julia -t 48</code> and at <code>julia -t 8</code>.</p><pre><code class="language-julia hljs">using NestedThreading, LinearAlgebra, BenchmarkTools
+import Polyester
+
+nt = Threads.nthreads()
+
+# BLAS inside a threaded loop: four 384×384 matrix products per thread.
+As, Bs, Cs = ([randn(384, 384) for _ in 1:nt] for _ in 1:3)
+BLAS.set_num_threads(nt)
+
+function gemm_plain!(Cs, As, Bs)
+    Threads.@threads for j in eachindex(Cs)
+        for _ in 1:4
+            mul!(Cs[j], As[j], Bs[j])
+        end
+    end
+end
+
+function gemm_budgeted!(Cs, As, Bs)
+    @budgeted_threads for j in eachindex(Cs)
+        for _ in 1:4
+            mul!(Cs[j], As[j], Bs[j])
+        end
+    end
+end
+
+@btime gemm_plain!($Cs, $As, $Bs)        # -t 48: 86 s       -t 8: 28 ms
+@btime gemm_budgeted!($Cs, $As, $Bs)     # -t 48: 0.10 s     -t 8: 19 ms
+
+# Polyester inside a threaded loop: a sum over 16384 elements, eight times per thread.
+data = [randn(2^14) for _ in 1:nt]
+out = zeros(nt)
+
+function batch_plain!(out, data)
+    Threads.@threads for j in eachindex(data)
+        acc = 0.0
+        for _ in 1:8
+            Polyester.@batch reduction = ((+, acc),) for i in eachindex(data[j])
+                acc += sin(data[j][i])
+            end
+        end
+        out[j] = acc
+    end
+end
+
+function batch_budgeted!(out, data)
+    @budgeted_threads for j in eachindex(data)
+        acc = 0.0
+        for _ in 1:8
+            Polyester.@batch reduction = ((+, acc),) for i in eachindex(data[j])
+                acc += sin(data[j][i])
+            end
+        end
+        out[j] = acc
+    end
+end
+
+@btime batch_plain!($out, $data)         # -t 48: 1.1 s      -t 8: 2.6 ms
+@btime batch_budgeted!($out, $data)      # -t 48: 13.5 ms    -t 8: 4.1 ms</code></pre><p>When Julia uses every core, the unbudgeted loops are 846x and 82x slower. With cores to spare, nesting costs little, and budgeting the Polyester loop makes it slower. <a href="design/#Design">Design</a> has the full table.</p><p>Polyester&#39;s workers keep spinning on Julia&#39;s threads for a while after a <code>@batch</code> loop ends, and a <code>Threads.@threads</code> loop started in that window waits for them. The budgeted macros release them first:</p><pre><code class="language-julia hljs">xs = rand(2^12)
+
+function side_by_side_plain!(xs)
+    Polyester.@batch for i in eachindex(xs)
+        xs[i] = sin(xs[i])
+    end
+    Threads.@threads for i in eachindex(xs)
+        xs[i] = cos(xs[i])
+    end
+end
+
+function side_by_side_budgeted!(xs)
+    @budgeted_batch for i in eachindex(xs)
+        xs[i] = sin(xs[i])
+    end
+    @budgeted_threads for i in eachindex(xs)
+        xs[i] = cos(xs[i])
+    end
+end
+
+@btime side_by_side_plain!($xs)          # -t 8: 70–130 µs
+@btime side_by_side_budgeted!($xs)       # -t 8: 35 µs</code></pre><h2 id="Where-to-go-next"><a class="docs-heading-anchor" href="#Where-to-go-next">Where to go next</a><a id="Where-to-go-next-1"></a><a class="docs-heading-anchor-permalink" href="#Where-to-go-next" title="Permalink"></a></h2><ul><li><a href="guides/loops/#Budget-a-parallel-loop">How-to guides</a>: budget loops, restrict other calls, register a library.</li><li><a href="design/#Design">Design</a>: why limits work the way they do.</li><li><a href="rules/#Composition-rules">Composition rules</a> and the <a href="api/#API-reference">API</a>: exact behavior.</li></ul><div class="admonition is-info" id="Disclaimer-9a1d1e71e8ce49aa"><header class="admonition-header">Disclaimer<a class="admonition-anchor" href="#Disclaimer-9a1d1e71e8ce49aa" title="Permalink"></a></header><div class="admonition-body"><p>This package was written mostly by Claude (Anthropic&#39;s coding assistant), under human direction and review. Treat it as you would any other third-party dependency and read the code before relying on it.</p></div></div></article><nav class="docs-footer"><a class="docs-footer-nextpage" href="guides/loops/">Budget a parallel loop »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.20.0 on <span class="colophon-date" title="Friday 20 November 2026 14:35">Friday 20 November 2026</span>. Using Julia version 1.13.4.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
