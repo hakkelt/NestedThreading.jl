@@ -15,9 +15,13 @@ makedocs(;
     authors = "Tamás Hakkel",
     pages = [
         "Home" => "index.md",
-        "Composition rules" => "composition.md",
-        "Adding a library" => "extending.md",
-        "API reference" => "api.md",
+        "How-to guides" => [
+            "guides/loops.md",
+            "guides/scopes.md",
+            "guides/extending.md",
+        ],
+        "Design" => "design.md",
+        "Reference" => ["rules.md", "libraries.md", "api.md"],
     ],
     checkdocs = :exports,
 )

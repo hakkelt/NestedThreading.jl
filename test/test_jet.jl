@@ -1,6 +1,6 @@
 # A note on what is and is not checked here.
 #
-# `CountedPool.get`/`set` and `GuardedPool.guard` are abstractly-typed `Function` fields.
+# The registered `get`/`set`/`guard` callables are stored in abstractly-typed fields.
 # A registry that downstream packages extend at load time cannot be concretely typed, so
 # calling through them is a runtime dispatch — see the long comment in `src/registry.jl`
 # for why `FunctionWrapper` fields make this worse rather than better. It costs one dispatch
@@ -40,11 +40,12 @@ end
     const NT = NestedThreading
 
     f() = 1 + 1
-    @test_call NT.with_thread_budget(f, 2)
-    @test_call NT.with_restricted_threads(f)
-    @test_call NT.with_full_threads(f)
-    @test_call NT.enable_full_threading()
-    @test_call NT.register_counted_pool!(() -> 1, identity; name = :jet_probe)
+    @test_call NT.with_thread_limit(f, 2)
+    @test_call NT.with_threads_disabled(f)
+    @test_call NT.with_threads_enabled(f)
+    @test_call NT.reset_thread_counts!()
+    @test_call NT.register_pool!(:jet_probe; get = () -> 1, set = identity)
+    @test_call NT.thread_pool_info()
 end
 
 @testitem "JET: macro expansions" tags = [:jet] begin

@@ -100,18 +100,88 @@ end
 
     expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
 
-    @test_throws Exception expand("@budgeted Threads.@threads 1 + 1")
-    @test_throws Exception expand("@budgeted_threads while true; break; end")
+    @test_throws "expected a `for` loop, optionally wrapped in macros, got" expand(
+        "@budgeted Threads.@threads 1 + 1"
+    )
+    @test_throws "`@budgeted_threads` expected a `for` loop" expand(
+        "@budgeted_threads while true; break; end"
+    )
     # Multiple iteration specs have an ambiguous trip count.
-    @test_throws Exception expand("@budgeted_threads for i in 1:2, j in 1:2; nothing; end")
+    @test_throws "only a single `for x in range` iteration spec is supported" expand(
+        "@budgeted_threads for i in 1:2, j in 1:2; nothing; end"
+    )
     # `@budgeted` needs a loop *construct*; a bare `for` would silently be sequential.
-    @test_throws Exception expand("@budgeted for i in 1:2; nothing; end")
+    @test_throws "`@budgeted` expects a parallel loop construct" expand(
+        "@budgeted for i in 1:2; nothing; end"
+    )
     # An unrecognised keyword argument is an error, not silently ignored.
-    @test_throws Exception expand("@budgeted_threads thread = true for i in 1:2; nothing; end")
+    @test_throws "the switch is `threads = <Bool>`" expand(
+        "@budgeted_threads thread = true for i in 1:2; nothing; end"
+    )
 
     # ...and the well-formed shapes do expand.
     @test expand("@budgeted Threads.@threads for i in 1:2; nothing; end") isa Expr
     @test expand("@budgeted_threads threads = f() for i in 1:2; nothing; end") isa Expr
+end
+
+@testitem "loop macros forward the options of the macro they emit" tags = [:macros] setup = [Probe] begin
+    using NestedThreading
+    import Polyester
+    Probe.reset!()
+
+    expand(str) = macroexpand(@__MODULE__, Meta.parse(str); recursive = false)
+    contains_arg(ex, arg) = ex == arg || (ex isa Expr && any(a -> contains_arg(a, arg), ex.args))
+
+    # The schedule reaches `Threads.@threads`, the options reach `@batch`, in either order
+    # relative to the `threads =` switch, and the switch itself is not forwarded.
+    ex = expand("@budgeted_threads :static threads = flag for i in 1:2; nothing; end")
+    @test contains_arg(ex, QuoteNode(:static))
+    @test !contains_arg(ex, :(threads = flag))
+    ex = expand("@budgeted_batch threads = flag minbatch = 64 per = core for i in 1:2; nothing; end")
+    @test contains_arg(ex, :(minbatch = 64)) && contains_arg(ex, :(per = core))
+    @test !contains_arg(ex, :(threads = flag))
+
+    for flag in (true, false)
+        out = zeros(Int, 8)
+        tids = zeros(Int, 8)
+        @budgeted_threads :static threads = flag for i in 1:8
+            out[i] = Probe.VALUE[]
+            tids[i] = Threads.threadid()
+        end
+        @test all(==(flag ? max(1, NestedThreading.capacity() ÷ 8) : 1), out)
+        flag || @test length(unique(tids)) == 1
+
+        # `minbatch` above the trip count keeps `@batch` on the calling thread.
+        out = zeros(Int, 8)
+        tids = zeros(Int, 8)
+        @budgeted_batch minbatch = 1000 threads = flag for i in 1:8
+            out[i] = i
+            tids[i] = Threads.threadid()
+        end
+        @test out == 1:8
+        @test length(unique(tids)) == 1
+    end
+    if NestedThreading.capacity() > 1
+        tids = zeros(Int, 64 * NestedThreading.capacity())
+        @budgeted_batch per = thread for i in eachindex(tids)
+            tids[i] = Threads.threadid()
+        end
+        @test length(unique(tids)) > 1
+    end
+    @test Probe.VALUE[] == 16
+
+    # An option the emitted macro does not know is rejected by it, at expansion.
+    full(str) = macroexpand(@__MODULE__, Meta.parse(str))
+    @test_throws "unsupported schedule argument" full(
+        "@budgeted_threads :nonsense for i in 1:2; nothing; end"
+    )
+    @test_throws "the switch is `threads = <Bool>`" full(
+        "@budgeted_threads thread = true for i in 1:2; nothing; end"
+    )
+    # The loop comes last.
+    @test_throws "expects the loop last" expand(
+        "@budgeted_threads for i in 1:2; nothing; end :static"
+    )
 end
 
 @testitem "a chain that already parallelizes is rejected" tags = [:macros] begin
@@ -125,13 +195,6 @@ end
     end
 
     expand(str) = macroexpand(@__MODULE__, Meta.parse(str))
-    # The error is thrown during expansion, so it arrives wrapped in a LoadError.
-    message(str) = sprint(showerror, try
-            expand(str)
-            nothing
-        catch err
-            err
-        end)
 
     # `@budgeted_threads` emits `Threads.@threads` itself, so a chain containing another
     # parallel loop macro would parallelize the same loop twice — `@budgeted_threads
@@ -144,9 +207,10 @@ end
             "@budgeted_batch Threads.@threads for i in 1:2; nothing; end",
             "@budgeted_threads threads = false @distributed for i in 1:2; nothing; end",
         )
-        @test_throws Exception expand(str)
         # The message points at the fix rather than just failing.
-        @test occursin("@budgeted", message(str))
+        @test_throws r"emits `[^`]+` itself, but the loop is already wrapped in .*Use `@budgeted " expand(
+            str
+        )
     end
 
     # Body-level macros distribute no iterations and are still accepted. (`@simd` is not
@@ -180,7 +244,7 @@ end
 
     # A nested Polyester loop is switched off inside any restricted scope, regardless of how
     # much headroom the budget nominally leaves. Limiting it proportionally instead was
-    # measured 320x worse in the saturated regime; see the Polyester extension.
+    # measured 320x worse in the saturated regime; see the PolyesterWeave extension.
     nested_threads(trip) = begin
         distinct = zeros(Int, trip)
         @budgeted_threads for j in 1:trip
@@ -229,7 +293,7 @@ end
     @test Probe.VALUE[] == 16                 # ...while counted pools were still budgeted
 end
 
-@testitem "the Julia-scheduler macros quiesce foreign pools, the Polyester ones do not" tags = [:macros] setup = [Probe] begin
+@testitem "the loop macros quiesce foreign pools, and never Polyester around @batch" tags = [:macros] setup = [Probe] begin
     using NestedThreading
     import Polyester
     Probe.reset!()
@@ -248,22 +312,78 @@ end
     end
     @test Probe.quiesce_count() == 2
 
-    # `@budgeted_batch`, and `@budgeted` over a `@batch`, are Polyester's own regions: asking
-    # Polyester to park the workers it is about to use again would be pure overhead, so the
-    # same `exclude = (:polyester,)` that keeps the guard off also keeps the quiesce off.
+    # `@budgeted_batch`, and `@budgeted` over a `@batch`, run on Julia's threads too, so other
+    # pools are quiesced around them. Polyester is not: they are its own regions, and asking
+    # it to park the workers it is about to use again would be pure overhead. The same
+    # `exclude = (:polyester,)` that keeps its guard off keeps its quiesce off.
     @budgeted_batch for i in 1:8
         out[i] = 3i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 3
 
     @budgeted @inbounds Polyester.@batch for i in 1:8
         out[i] = 4i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 4
+    @test out == 4 .* (1:8)
+
+    for ex in (
+            :(
+                @budgeted_batch for i in 1:8
+                end
+            ),
+            :(
+                @budgeted Polyester.@batch for i in 1:8
+                end
+            ),
+        )
+        expansion = string(macroexpand(@__MODULE__, ex))
+        @test occursin("_quiesce_foreign_pools((:polyester,))", expansion)
+    end
+    NestedThreading._quiesce_foreign_pools((:probe_quiesce,))
+    @test Probe.quiesce_count() == 4
 
     # The sequential branch opens no parallel region at all.
     @budgeted_threads threads = false for i in 1:8
         out[i] = 5i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 4
+end
+
+@testitem "generic axes: loop macros over offset and view ranges" tags = [:macros] begin
+    using NestedThreading, OffsetArrays, Polyester
+    const NT = NestedThreading
+
+    x = collect(1.0:10.0)
+    @testset "$name" for (name, a) in
+        (("offset", OffsetArray(x, -3)), ("view", view(x, 2:9)))
+        @test NT.budget_for(a) == NT.budget_for(collect(a))
+
+        # Every index is visited exactly once, keyed by the array's own indices.
+        for mk in (:threads, :batch)
+            hits = OffsetArray(zeros(Int, length(a)), axes(a))
+            if mk === :threads
+                @budgeted_threads for i in eachindex(a)
+                    hits[i] += 1
+                end
+            else
+                @budgeted_batch for i in eachindex(a)
+                    hits[i] += 1
+                end
+            end
+            @test all(==(1), hits)
+        end
+
+        # Iterating the values directly sees every element.
+        s = Threads.Atomic{Float64}(0.0)
+        @budgeted_threads for v in a
+            Threads.atomic_add!(s, v)
+        end
+        @test s[] == sum(a)
+        s[] = 0.0
+        @budgeted_batch for v in a
+            Threads.atomic_add!(s, v)
+        end
+        @test s[] == sum(a)
+    end
 end

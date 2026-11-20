@@ -241,26 +241,26 @@ end
 
     plain!(out, data, reps) =
         Threads.@threads for j in eachindex(data)
-            out[j] = serial_kern(data[j], reps)
-        end
+        out[j] = serial_kern(data[j], reps)
+    end
     noop_wrapped!(out, data, reps) =
         ((f) -> f())() do
-            Threads.@threads for j in eachindex(data)
-                out[j] = serial_kern(data[j], reps)
-            end
+        Threads.@threads for j in eachindex(data)
+            out[j] = serial_kern(data[j], reps)
         end
+    end
     budget_no_guard!(out, data, reps) =
-        NestedThreading.with_thread_budget(1; exclude = (:polyester,)) do
-            Threads.@threads for j in eachindex(data)
-                out[j] = serial_kern(data[j], reps)
-            end
+        NestedThreading.with_thread_limit(1; exclude = (:polyester,)) do
+        Threads.@threads for j in eachindex(data)
+            out[j] = serial_kern(data[j], reps)
         end
+    end
     guard_only!(out, data, reps) =
         Polyester.disable_polyester_threads() do
-            Threads.@threads for j in eachindex(data)
-                out[j] = serial_kern(data[j], reps)
-            end
+        Threads.@threads for j in eachindex(data)
+            out[j] = serial_kern(data[j], reps)
         end
+    end
 
     BenchHelpers.warmup!(call, (plain!, noop_wrapped!, budget_no_guard!, guard_only!))
 

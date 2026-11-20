@@ -11,9 +11,7 @@ import Strided
 _set(n::Integer) = Strided.set_num_threads(clamp(Int(n), 1, Threads.nthreads()))
 
 function __init__()
-    return NestedThreading.register_counted_pool!(
-        Strided.get_num_threads, _set; name = :strided
-    )
+    return NestedThreading.register_pool!(:strided; get = Strided.get_num_threads, set = _set)
 end
 
 end # module NestedThreadingStridedExt

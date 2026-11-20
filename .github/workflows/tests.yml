@@ -50,10 +50,9 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
 
-  # `capacity() == 1` collapses "restricted" and "full throttle" onto the same budget, which
-  # is a genuinely different code path for every all-or-nothing pool — it is where the NFFT
-  # boolean mapping was found not to round-trip. The main matrix runs at 4 threads, so this
-  # regime needs a job of its own.
+  # At `capacity() == 1` "restricted" and "unrestricted" are the same count, which takes a
+  # different code path in every all-or-nothing pool (the NFFT on/off mapping must still
+  # round-trip). The main matrix runs at 4 threads, so this case needs a job of its own.
   single-thread:
     name: Single-threaded session
     runs-on: ubuntu-latest
@@ -91,12 +90,11 @@ jobs:
             Pkg.instantiate()
             using NestedThreading, LinearAlgebra
             NT = NestedThreading
-            @assert [p.name for p in NT.COUNTED_POOLS] == [:blas]
-            @assert isempty(NT.GUARDED_POOLS)
+            @assert [p.name for p in thread_pool_info()] == [:blas]
             @assert Base.get_extension(NestedThreading, :NestedThreadingFFTWExt) === nothing
-            @assert Base.get_extension(NestedThreading, :NestedThreadingPolyesterExt) === nothing
+            @assert Base.get_extension(NestedThreading, :NestedThreadingPolyesterWeaveExt) === nothing
             original = BLAS.get_num_threads()
-            NT.with_restricted_threads() do
+            NT.with_threads_disabled() do
                 @assert BLAS.get_num_threads() == 1
             end
             @assert BLAS.get_num_threads() == original
@@ -131,9 +129,9 @@ jobs:
             using NestedThreading, MKL
             NT = NestedThreading
             @assert Base.get_extension(NestedThreading, :NestedThreadingMKLExt) !== nothing
-            @assert :mkl in [p.name for p in NT.COUNTED_POOLS]
+            @assert any(p -> p.name === :mkl && p.has_count, thread_pool_info())
             original = MKL.get_num_threads()
-            NT.with_thread_budget(2) do
+            NT.with_thread_limit(2) do
                 @assert MKL.get_num_threads() == 2
             end
             @assert MKL.get_num_threads() == original

@@ -1,13 +1,18 @@
-module NestedThreadingPolyesterExt
+module NestedThreadingPolyesterWeaveExt
 
+import ManualMemory
 import NestedThreading
-import Polyester
+import PolyesterWeave
+import ThreadingUtilities
 
-# Polyester has no thread-count setter, so this guard switches it off for the duration of any
-# restricted scope. It does that the way `disable_polyester_threads` does, by reserving every
-# PolyesterWeave worker slot, so nested `@batch` loops find none free and run serially. Reservation is
+# PolyesterWeave hands out the worker tasks (ThreadingUtilities tasks, one per Julia thread)
+# that Polyester's `@batch`, LoopVectorization's `@tturbo` and Octavian all launch on, so this
+# extension covers all three. They have no thread-count setter, so this guard switches them off
+# for the duration of any restricted scope. It does that the way Polyester's
+# `disable_polyester_threads` does, by reserving every PolyesterWeave worker slot, so nested
+# `@batch` and `@tturbo` loops find none free and run serially. Reservation is
 # inherently nesting- and concurrency-safe (an atomic take from a shared mask), which is why
-# Polyester is a GuardedPool rather than a CountedPool: there is no global count to snapshot
+# Polyester registers a guard rather than a thread count: there is no global count to snapshot
 # and restore, and hence none of the interleaving hazard that would come with one.
 #
 # WHY NOT A PARTIAL LIMIT
@@ -47,8 +52,9 @@ end
 # Polyester's workers are Julia tasks that spin on a state word for ~2^20 `pause()` iterations
 # after a `@batch` region ends before parking themselves, so until then they are still
 # occupying Julia's threads and a `Threads.@threads` region opened in that window waits for
-# them rather than running on them. Parking them at once removes the wait. See `QuiescePool`
-# for the measurements and <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
+# them rather than running on them. Parking them at once removes the wait. See
+# `NestedThreading.register_pool!` for the measurements and
+# <https://github.com/JuliaSIMD/Polyester.jl/issues/82>.
 #
 # Only the workers taken from PolyesterWeave's free mask are parked, never all of them as
 # `ThreadingUtilities.sleep_all_tasks` does. That function overwrites every worker's function
@@ -66,22 +72,22 @@ function _quiesce()
     return nothing
 end
 
-_reserve_all() = last(Polyester.PolyesterWeave.request_threads(Threads.nthreads()))
-_release!(masks) = foreach(Polyester.PolyesterWeave.free_threads!, masks)
+_reserve_all() = last(PolyesterWeave.request_threads(Threads.nthreads()))
+_release!(masks) = foreach(PolyesterWeave.free_threads!, masks)
 
 # Mirrors `ThreadingUtilities.sleep_all_tasks`, restricted to the workers set in `masks`: bit
 # `b` of the `j`-th mask is worker `64(j - 1) + b + 1`, the numbering `@batch` launches with.
 # Each park request is issued before any is waited for, so the workers park in parallel.
 function _park!(masks)
-    fptr = @cfunction(Polyester.ThreadingUtilities._sleep, Cvoid, (Ptr{UInt},))
+    fptr = @cfunction(ThreadingUtilities._sleep, Cvoid, (Ptr{UInt},))
     _foreach_worker(masks) do tid
-        p = Polyester.ThreadingUtilities.taskpointer(tid)
-        Polyester.ThreadingUtilities.store!(p, fptr, sizeof(UInt))
-        Polyester.ThreadingUtilities._atomic_cas_cmp!(
-            p, Polyester.ThreadingUtilities.SPIN, Polyester.ThreadingUtilities.TASK
+        p = ThreadingUtilities.taskpointer(tid)
+        ManualMemory.store!(p, fptr, sizeof(UInt))
+        ThreadingUtilities._atomic_cas_cmp!(
+            p, ThreadingUtilities.SPIN, ThreadingUtilities.TASK
         )
     end
-    _foreach_worker(Polyester.ThreadingUtilities.wait, masks)
+    _foreach_worker(ThreadingUtilities.wait, masks)
     return nothing
 end
 
@@ -99,8 +105,7 @@ function _foreach_worker(f::F, masks) where {F}
 end
 
 function __init__()
-    NestedThreading.register_guarded_pool!(_guard; name = :polyester)
-    return NestedThreading.register_quiesce_pool!(_quiesce; name = :polyester)
+    return NestedThreading.register_pool!(:polyester; guard = _guard, quiesce = _quiesce)
 end
 
-end # module NestedThreadingPolyesterExt
+end # module NestedThreadingPolyesterWeaveExt

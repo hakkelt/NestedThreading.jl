@@ -2,14 +2,25 @@
     using NestedThreading
     if VERSION >= v"1.11"
         for name in (
-                :with_thread_budget, :with_thread_default, :with_thread_grant,
-                :register_counted_pool!, :register_guarded_pool!, :register_quiesce_pool!,
-                :register_park_hook!, :CountedPool, :GuardedPool, :QuiescePool, :ParkHook,
-                :park_openblas, :capacity, :budget_for,
+                :register_pool!, :capacity, :thread_limit, :quiesce_foreign_pools,
+                :reset_thread_counts!,
             )
             @test Base.ispublic(NestedThreading, name)
         end
+        for name in (
+                :CountedPool, :GuardedPool, :QuiescePool, :park_openblas, :budget_for,
+            )
+            @test !Base.ispublic(NestedThreading, name)
+        end
     end
+    # Exported: the loop macros and the scope functions, nothing else.
+    @test Set(filter(n -> Base.isexported(NestedThreading, n), names(NestedThreading))) == Set(
+        [
+            :NestedThreading, Symbol("@budgeted"), Symbol("@budgeted_threads"),
+            Symbol("@budgeted_batch"), :with_threads_disabled, :with_threads_enabled,
+            :with_thread_limit, :with_thread_default, :with_thread_grant, :thread_pool_info,
+        ]
+    )
 end
 
 @testitem "pool registration" tags = [:registry] setup = [Probe] begin
@@ -19,38 +30,96 @@ end
     @test :blas in [p.name for p in NT.COUNTED_POOLS]
     @test :probe in [p.name for p in NT.COUNTED_POOLS]
     @test :probe_guard in [p.name for p in NT.GUARDED_POOLS]
+    @test :probe_quiesce in [p.name for p in NT.QUIESCE_POOLS[]]
     @test length(NT.SAVED) == length(NT.COUNTED_POOLS)
     @test length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
 
-    # Registering the same name twice is a no-op rather than a duplicate pool.
-    before = length(NT.COUNTED_POOLS)
-    NT.register_counted_pool!(() -> 1, identity; name=:probe)
-    @test length(NT.COUNTED_POOLS) == before
-    @test count(p -> p.name === :probe, NT.COUNTED_POOLS) == 1
+    # Every rejected registration leaves the registry exactly as it was.
+    state() = (
+        copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
+        length(NT.QUIESCE_POOLS[]), length(NT.SAVED), length(NT.MAXIMA),
+    )
+    before = state()
+    g() = 1
+    s(n) = n
+    @test_throws "a pool named :probe is already registered" NT.register_pool!(
+        :probe; get = g, set = s
+    )
+    @test_throws "a pool named :probe_guard is already registered" NT.register_pool!(
+        :probe_guard; quiesce = () -> nothing
+    )
+    @test_throws "has `get` but no `set`" NT.register_pool!(:bad_probe; get = g)
+    @test_throws "has `set` but no `get`" NT.register_pool!(:bad_probe; set = s)
+    @test_throws "has `park` but no `get`/`set`" NT.register_pool!(
+        :bad_probe; guard = (f, n) -> f(), park = () -> nothing
+    )
+    @test_throws "has no control" NT.register_pool!(:bad_probe)
+    @test_throws ArgumentError NT.register_pool!(:bad_probe)
+    @test_throws "returned 2.0 of type Float64" NT.register_pool!(
+        :bad_probe; get = () -> 2.0, set = s
+    )
+    @test_throws "returned nothing of type Nothing" NT.register_pool!(
+        :bad_probe; get = () -> nothing, set = s
+    )
+    @test state() == before
+    @test !(:bad_probe in NT.POOL_NAMES[])
+end
 
-    # ...and the same for guarded pools.
-    before_guarded = length(NT.GUARDED_POOLS)
-    NT.register_guarded_pool!((f, budget) -> f(); name=:probe_guard)
-    @test length(NT.GUARDED_POOLS) == before_guarded
-    @test count(p -> p.name === :probe_guard, NT.GUARDED_POOLS) == 1
+@testitem "thread_pool_info describes the registry" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, LinearAlgebra
+    const NT = NestedThreading
+    Probe.reset!()
 
-    # ...and the same for quiesce pools.
-    before_quiesce = length(NT.QUIESCE_POOLS)
-    NT.register_quiesce_pool!(() -> nothing; name = :probe_quiesce)
-    @test length(NT.QUIESCE_POOLS) == before_quiesce
-    @test count(p -> p.name === :probe_quiesce, NT.QUIESCE_POOLS) == 1
+    info = thread_pool_info()
+    @test info isa Vector{<:NamedTuple}
+    @test [p.name for p in info] == NT.POOL_NAMES[]
+    byname(name, info = thread_pool_info()) = only(filter(p -> p.name === name, info))
 
-    # The three parallel arrays stay index-aligned after all of that.
-    @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
+    blas = byname(:blas, info)
+    @test (blas.has_count, blas.has_guard, blas.has_quiesce, blas.has_park) ==
+        (true, false, false, true)
+    @test blas.current == blas.unrestricted == blas.effective == BLAS.get_num_threads()
+
+    probe = byname(:probe, info)
+    @test (probe.has_count, probe.has_guard, probe.has_quiesce, probe.has_park) ==
+        (true, false, false, true)
+    @test probe.current == probe.unrestricted == probe.effective == 16
+
+    guard = byname(:probe_guard, info)
+    @test (guard.has_count, guard.has_guard, guard.has_quiesce, guard.has_park) ==
+        (false, true, false, false)
+    @test guard.current === guard.unrestricted === guard.effective === nothing
+    @test byname(:probe_quiesce, info).has_quiesce
+
+    # Inside a scope: `current` and `effective` follow the limit, `unrestricted` is the
+    # value the last scope restores.
+    with_thread_limit(3; only = (:probe,)) do
+        probe = byname(:probe)
+        @test (probe.current, probe.unrestricted, probe.effective) == (3, 16, 3)
+        @test byname(:blas).effective == BLAS.get_num_threads()
+    end
+    @test byname(:probe).current == 16
+
+    # The single-pool query reports the same entry as the full listing.
+    for name in NT.POOL_NAMES[]
+        @test thread_pool_info(name) == byname(name)
+    end
+    with_thread_limit(3; only = :probe) do
+        @test thread_pool_info(:probe) == byname(:probe)
+        @test thread_pool_info(:probe).effective == 3
+    end
+    @test thread_pool_info(:probe_guard).has_guard
+    @test thread_pool_info(:probe_guard).current === nothing
 end
 
 @testitem "quiesce_foreign_pools calls every registered hook once" tags = [:registry] setup = [Probe] begin
     using NestedThreading
+    const NT = NestedThreading
     Probe.reset!()
 
-    quiesce_foreign_pools()
+    NT.quiesce_foreign_pools()
     @test Probe.quiesce_count() == 1
-    quiesce_foreign_pools()
+    NT.quiesce_foreign_pools()
     @test Probe.quiesce_count() == 2
 end
 
@@ -69,8 +138,8 @@ end
     # (not a `const` one) right after the item completes, which would otherwise turn every
     # later `late[]` into a `MethodError` on `nothing`.
     const late = Ref(12)
-    NT.with_thread_budget(1) do
-        NT.register_counted_pool!(() -> late[], n -> (late[] = n); name=:late_probe)
+    NT.with_thread_limit(1) do
+        NT.register_pool!(:late_probe; get = () -> late[], set = n -> (late[] = n))
         @test late[] == 1                       # the restriction reached the newcomer
     end
     @test late[] == 12                          # ...and its own value came back
@@ -81,10 +150,48 @@ end
     @test length(NT.SAVED) == length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
 
     # It now participates in ordinary scopes like any other pool.
-    NT.with_thread_budget(3) do
+    NT.with_thread_limit(3) do
         @test late[] == 3
     end
     @test late[] == 12
+
+    # A guard registered inside an open scope does not apply to that scope, and the scope
+    # still runs to completion; the next restricted scope invokes it. `const` for the same
+    # reason as `late`.
+    const late_guarded = Threads.Atomic{Int}(0)
+    result = NT.with_thread_limit(1) do
+        NT.register_pool!(
+            :late_guard; guard = (f, n) -> (Threads.atomic_add!(late_guarded, 1); f())
+        )
+        :body_done
+    end
+    @test result === :body_done
+    @test late_guarded[] == 0
+    NT.with_thread_limit(1) do
+        nothing
+    end
+    # A guard runs only under a limit below `capacity()`, which a limit of 1 is not when
+    # `capacity() == 1`.
+    @test late_guarded[] == (NT.capacity() > 1 ? 1 : 0)
+
+    # A `set` that throws while a scope is open fails the registration and records nothing:
+    # the name stays free.
+    state() = (
+        copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
+        length(NT.QUIESCE_POOLS[]), copy(NT.SAVED), copy(NT.MAXIMA),
+    )
+    NT.with_thread_limit(1) do
+        before = state()
+        @test_throws "set refused" NT.register_pool!(
+            :refusing_probe; get = () -> 4, set = n -> error("set refused"),
+            quiesce = () -> nothing,
+        )
+        @test state() == before
+        @test length(NT.ACTIVE) == 1
+    end
+    @test !(:refusing_probe in NT.POOL_NAMES[])
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
 end
 
 @testitem "scoped save/apply/restore" tags = [:registry] setup = [Probe] begin
@@ -94,7 +201,7 @@ end
 
     original = BLAS.get_num_threads()
 
-    result = NT.with_thread_budget(3) do
+    result = NT.with_thread_limit(3) do
         @test Probe.VALUE[] == 3
         @test BLAS.get_num_threads() == 3
         :done
@@ -104,15 +211,15 @@ end
     @test BLAS.get_num_threads() == original
 
     # Budgets are clamped to >= 1.
-    NT.with_thread_budget(0) do
+    NT.with_thread_limit(0) do
         @test Probe.VALUE[] == 1
     end
-    NT.with_thread_budget(-5) do
+    NT.with_thread_limit(-5) do
         @test Probe.VALUE[] == 1
     end
 
     # The restore happens on the exception path too.
-    @test_throws ErrorException NT.with_thread_budget(() -> error("boom"), 2)
+    @test_throws ErrorException NT.with_thread_limit(() -> error("boom"), 2)
     @test Probe.VALUE[] == 16
     @test BLAS.get_num_threads() == original
     @test isempty(NT.ACTIVE)
@@ -123,13 +230,13 @@ end
     const NT = NestedThreading
     Probe.reset!()
 
-    NT.with_thread_budget(2) do
+    NT.with_thread_limit(2) do
         @test Probe.VALUE[] == 2
-        NT.with_thread_budget(8) do          # asks for more...
+        NT.with_thread_limit(8) do          # asks for more...
             @test Probe.VALUE[] == 2         # ...and does not get it
         end
         @test Probe.VALUE[] == 2
-        NT.with_restricted_threads() do
+        NT.with_threads_disabled() do
             @test Probe.VALUE[] == 1
         end
         @test Probe.VALUE[] == 2             # inner exit restores the outer budget,
@@ -137,25 +244,25 @@ end
     @test Probe.VALUE[] == 16
 end
 
-@testitem "with_full_threads / with_restricted_threads" tags = [:registry] setup = [Probe] begin
+@testitem "with_threads_enabled / with_threads_disabled" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading
     Probe.reset!()
 
-    NT.with_full_threads() do
+    NT.with_threads_enabled() do
         @test Probe.VALUE[] == NT.capacity()
         # Nothing is restricted, so guards are skipped entirely rather than invoked with a
         # "not restricted" flag.
         @test !Probe.guarded()
     end
     Probe.reset!()
-    NT.with_restricted_threads() do
+    NT.with_threads_disabled() do
         @test Probe.VALUE[] == 1
         NT.capacity() > 1 && @test Probe.last_budget() == 1
     end
     # Nested inside a restriction, a full-threads request is still clamped.
-    NT.with_restricted_threads() do
-        NT.with_full_threads() do
+    NT.with_threads_disabled() do
+        NT.with_threads_enabled() do
             @test Probe.VALUE[] == 1
         end
     end
@@ -171,18 +278,18 @@ end
         # The guard is handed the budget itself, so a library with a partial limit (as
         # Polyester has) can leave the outer loop's unused threads available instead of
         # switching itself off.
-        NT.with_thread_budget(NT.capacity() - 1) do
+        NT.with_thread_limit(NT.capacity() - 1) do
             @test Probe.last_budget() == NT.capacity() - 1
         end
         Probe.reset!()
-        NT.with_restricted_threads() do
+        NT.with_threads_disabled() do
             @test Probe.last_budget() == 1
         end
         Probe.reset!()
     end
 
     # An unrestricted scope skips guards altogether.
-    NT.with_thread_budget(NT.capacity()) do
+    NT.with_thread_limit(NT.capacity()) do
         @test !Probe.guarded()
     end
     @test Probe.DEPTH[] == 0
@@ -193,7 +300,7 @@ end
     const NT = NestedThreading
     Probe.reset!()
 
-    NT.with_thread_budget(1; exclude=(:probe_guard,)) do
+    NT.with_thread_limit(1; exclude = (:probe_guard,)) do
         @test Probe.DEPTH[] == 0
         @test !Probe.guarded()
         @test Probe.VALUE[] == 1              # counted pools are still applied
@@ -202,22 +309,21 @@ end
     # A name that matches no registered guard is simply ignored, not an error — a caller
     # may exclude a pool whose package is not loaded in this session.
     Probe.reset!()
-    NT.with_thread_budget(1; exclude=(:not_a_pool,)) do
+    NT.with_thread_limit(1; exclude = (:not_a_pool,)) do
         NT.capacity() > 1 && @test Probe.guarded()
         @test Probe.VALUE[] == 1
     end
 end
 
-@testitem "exclude now actually leaves a counted pool alone" tags = [:registry] setup = [Probe] begin
+@testitem "exclude leaves a counted pool alone" tags = [:registry] setup = [Probe] begin
     using NestedThreading
     const NT = NestedThreading
     Probe.reset!()
 
-    # Regression test for C8: `exclude` used to be consulted only by `_run_guarded`, so
-    # naming a counted pool did nothing — the pool was restricted anyway. Now it is left at
-    # its pre-scope value, not merely unrestricted-by-this-scope but genuinely untouched.
+    # An excluded thread count keeps its pre-scope value, not merely unrestricted by this
+    # scope but untouched, while the scope's guards still apply.
     Probe.VALUE[] = 7
-    NT.with_thread_budget(1; exclude=(:probe,)) do
+    NT.with_thread_limit(1; exclude = (:probe,)) do
         @test Probe.VALUE[] == 7
         NT.capacity() > 1 && @test Probe.guarded()   # the guard is unaffected
     end
@@ -235,7 +341,7 @@ end
     # `only = (:blas,)` must restrict BLAS and leave the probe pools — counted and guarded
     # alike — exactly as they were, even past this scope's own budget.
     Probe.VALUE[] = 7
-    NT.with_thread_budget(1; only=(:blas,)) do
+    NT.with_thread_limit(1; only = (:blas,)) do
         @test BLAS.get_num_threads() == 1
         @test Probe.VALUE[] == 7
         NT.capacity() > 1 && @test !Probe.guarded()
@@ -246,7 +352,7 @@ end
     # `only = (:probe,)` is the mirror image: the probe counted pool is restricted, BLAS and
     # the probe guard are not.
     Probe.reset!()
-    NT.with_thread_budget(1; only=(:probe,)) do
+    NT.with_thread_limit(1; only = (:probe,)) do
         @test Probe.VALUE[] == 1
         @test BLAS.get_num_threads() == original_blas
         @test !Probe.guarded()
@@ -256,12 +362,65 @@ end
     # Nesting still only narrows: an outer plain restriction still wins even where an inner
     # scope's `only` does not name the pool.
     Probe.reset!()
-    NT.with_thread_budget(1) do
-        NT.with_thread_budget(NT.capacity(); only=(:blas,)) do
+    NT.with_thread_limit(1) do
+        NT.with_thread_limit(NT.capacity(); only = (:blas,)) do
             @test Probe.VALUE[] == 1   # untouched by the inner scope, still bound by the outer
         end
     end
     Probe.reset!()
+end
+
+@testitem "exclude and only take a name or any collection of names" tags = [:registry] setup = [Probe] begin
+    using NestedThreading
+    const NT = NestedThreading
+
+    # Every spelling of the same set of names restricts exactly the same pools.
+    observe(; kw...) = NT.with_thread_limit(1; kw...) do
+        (Probe.VALUE[], Probe.guarded())
+    end
+    for (tuple, others) in (
+            ((:probe,), (:probe, [:probe], Set([:probe]))),
+            ((:probe, :probe_guard), ([:probe, :probe_guard], (n for n in (:probe, :probe_guard)))),
+        )
+        for key in (:exclude, :only)
+            Probe.reset!()
+            expected = observe(; key => tuple)
+            for names in others
+                Probe.reset!()
+                @test observe(; key => names) == expected
+            end
+        end
+    end
+    Probe.reset!()
+    @test observe(; exclude = :probe)[1] == 16
+    Probe.reset!()
+    @test observe(; only = :probe) == (1, false)
+    Probe.reset!()
+
+    # `exclude` and `only` combine: the allowlist minus the denylist.
+    @test observe(; only = [:probe, :probe_guard], exclude = :probe_guard) == (1, false)
+    Probe.reset!()
+
+    # A name that is not a `Symbol` is a programming error, not a pool to skip quietly.
+    msg = "pool names in `exclude`/`only` must be `Symbol`s"
+    @test_throws msg NT.with_thread_limit(() -> nothing, 1; exclude = ["probe"])
+    @test_throws msg NT.with_threads_disabled(() -> nothing; only = ("probe",))
+    @test_throws ArgumentError NT.with_thread_default(() -> nothing, 1; exclude = [1])
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
+
+    # Every scope function accepts the widened forms.
+    for scope in (
+            f -> NT.with_thread_limit(f, 1; only = :probe),
+            f -> NT.with_thread_default(f, 1; only = [:probe]),
+            f -> NT.with_threads_disabled(f; only = Set([:probe])),
+        )
+        Probe.reset!()
+        @test scope(() -> Probe.VALUE[]) == 1
+    end
+    Probe.reset!()
+    @test NT.with_thread_grant(() -> :ok, 1; exclude = :probe) === :ok
+    @test NT.with_threads_enabled(() -> Probe.VALUE[]; exclude = [:probe]) == 16
 end
 
 @testitem "a full budget raises past a hand-set count" tags = [:registry] setup = [Probe] begin
@@ -271,11 +430,11 @@ end
 
     # The applied budget is written to every counted pool unconditionally, so a scope whose
     # budget works out to capacity() sets the pools *up* to it, past a lower value the
-    # caller configured by hand. That is what lets `with_full_threads` turn a default-off
+    # caller configured by hand. That is what lets `with_threads_enabled` turn a default-off
     # library (NFFT) on; the hand-set value is restored on exit.
     if NT.capacity() > 1
         Probe.VALUE[] = 1
-        NT.with_full_threads() do
+        NT.with_threads_enabled() do
             @test Probe.VALUE[] == NT.capacity()
         end
         @test Probe.VALUE[] == 1
@@ -296,7 +455,7 @@ end
     @test NT.budget_for(Iterators.filter(isodd, 1:10)) == 1      # unknown length: conservative
 end
 
-@testitem "enable_full_threading sets the baseline" tags = [:registry] setup = [Probe] begin
+@testitem "reset_thread_counts! sets the baseline" tags = [:registry] setup = [Probe] begin
     using NestedThreading, LinearAlgebra
     const NT = NestedThreading
     Probe.reset!()
@@ -305,15 +464,15 @@ end
     maximum_probe = NT.MAXIMA[Probe.probe_index()]
     try
         Probe.VALUE[] = 2
-        NT.enable_full_threading()
+        NT.reset_thread_counts!()
         @test Probe.VALUE[] == maximum_probe
 
         # An active scope still wins while it is active, and the *baseline* is what the
         # last exit restores to.
         Probe.VALUE[] = 2
-        NT.with_thread_budget(1) do
+        NT.with_thread_limit(1) do
             @test Probe.VALUE[] == 1
-            NT.enable_full_threading()
+            NT.reset_thread_counts!()
             @test Probe.VALUE[] == 1
         end
         @test Probe.VALUE[] == maximum_probe
@@ -338,7 +497,7 @@ end
         Threads.@spawn begin
             for _ in 1:50
                 budget = 1 + (i % 4)
-                NT.with_thread_budget(budget) do
+                NT.with_thread_limit(budget) do
                     # Invariant: while this scope is active nobody may have raised the
                     # applied count above what we asked for.
                     Probe.VALUE[] > budget && Threads.atomic_add!(violations, 1)
@@ -367,13 +526,13 @@ end
             @test Probe.VALUE[] == 8                  # a grant overrides the soft default
         end
         @test Probe.VALUE[] == 1
-        NT.with_thread_budget(4) do                   # a limit is a ceiling, not a request
+        NT.with_thread_limit(4) do                   # a limit is a ceiling, not a request
             @test Probe.VALUE[] == 1
             NT.with_thread_grant(8) do
                 @test Probe.VALUE[] == 4              # ...and a grant never passes it
             end
         end
-        NT.with_thread_budget(1) do
+        NT.with_thread_limit(1) do
             NT.with_thread_grant(8) do
                 @test Probe.VALUE[] == 1
             end
@@ -382,7 +541,7 @@ end
     @test Probe.VALUE[] == 16
 
     # A limit opened around the soft default clamps it the same way.
-    NT.with_thread_budget(2) do
+    NT.with_thread_limit(2) do
         NT.with_thread_default(6) do
             @test Probe.VALUE[] == 2
             NT.with_thread_grant(8) do
@@ -449,7 +608,7 @@ end
         @test Probe.park_count() == 1               # 8 -> 1
 
         # A grant that raised nothing parks nothing.
-        NT.with_thread_budget(1) do
+        NT.with_thread_limit(1) do
             NT.with_thread_grant(Returns(nothing), 8)
         end
         @test Probe.park_count() == 1
@@ -463,7 +622,7 @@ end
     end
 
     # Limits and soft defaults never park, even when their exit lowers nothing or restores.
-    NT.with_thread_budget(Returns(nothing), 2)
+    NT.with_thread_limit(Returns(nothing), 2)
     NT.with_thread_default(Returns(nothing), 2)
     @test Probe.park_count() == 2
 
@@ -477,13 +636,13 @@ end
     # loop of one item opens, does not count.
     if NT.capacity() > 2
         NT.with_thread_default(1) do
-            NT.with_thread_budget(2) do
+            NT.with_thread_limit(2) do
                 NT.with_thread_grant(8) do
                     @test Probe.VALUE[] == 2
                 end
             end
             @test Probe.park_count() == 2
-            NT.with_thread_budget(NT.capacity()) do
+            NT.with_thread_limit(NT.capacity()) do
                 NT.with_thread_grant(Returns(nothing), 8)
             end
             @test Probe.park_count() == 3
@@ -503,7 +662,7 @@ end
         Threads.@spawn begin
             for _ in 1:40
                 limit = 1 + (i % 3)
-                NT.with_thread_budget(limit) do
+                NT.with_thread_limit(limit) do
                     NT.with_thread_default(1) do
                         NT.with_thread_grant(8) do
                             # Whatever else is open, nothing may exceed this task's limit.
@@ -529,7 +688,7 @@ end
     using NestedThreading, LinearAlgebra
     const NT = NestedThreading
 
-    @test any(h -> h.name === :blas && h.park === NT.park_openblas, NT.PARK_HOOKS)
+    @test any(p -> p.name === :blas && p.park === NT.park_openblas, NT.COUNTED_POOLS)
     A = randn(256, 256)
     expected = A * A
     original = BLAS.get_num_threads()
@@ -551,63 +710,63 @@ end
     using NestedThreading
     const NT = NestedThreading
 
-    @test thread_limit(:probe) == typemax(Int)
+    @test NT.thread_limit(:probe) === nothing
     if VERSION < v"1.11"
         # No `ScopedValue`: enclosing scopes are not tracked, so nothing is reported.
-        with_restricted_threads() do
-            @test thread_limit(:probe) == typemax(Int)
+        with_threads_disabled() do
+            @test NT.thread_limit(:probe) === nothing
         end
     else
-        with_restricted_threads() do
-            @test thread_limit(:probe) == 1
-            @test thread_limit(:blas) == 1
+        with_threads_disabled() do
+            @test NT.thread_limit(:probe) == 1
+            @test NT.thread_limit(:blas) == 1
             # An unregistered name reports what a pool of that name would be held to.
-            @test thread_limit(:not_registered) == 1
+            @test NT.thread_limit(:not_registered) == 1
             # A task spawned inside the scope runs inside it too.
-            @test fetch(Threads.@spawn thread_limit(:probe)) == 1
+            @test fetch(Threads.@spawn NT.thread_limit(:probe)) == 1
         end
-        @test thread_limit(:probe) == typemax(Int)
+        @test NT.thread_limit(:probe) === nothing
 
         # Nested limits combine by minimum, and the outer one survives the inner one's exit.
-        NT.with_thread_budget(3) do
-            @test thread_limit(:probe) == 3
-            NT.with_thread_budget(2) do
-                @test thread_limit(:probe) == 2
+        NT.with_thread_limit(3) do
+            @test NT.thread_limit(:probe) == 3
+            NT.with_thread_limit(2) do
+                @test NT.thread_limit(:probe) == 2
             end
-            @test thread_limit(:probe) == 3
+            @test NT.thread_limit(:probe) == 3
         end
 
         # `exclude`/`only` decide which pools a limit applies to.
-        NT.with_thread_budget(1; exclude = (:probe,)) do
-            @test thread_limit(:probe) == typemax(Int)
-            @test thread_limit(:blas) == 1
+        NT.with_thread_limit(1; exclude = (:probe,)) do
+            @test NT.thread_limit(:probe) === nothing
+            @test NT.thread_limit(:blas) == 1
         end
-        NT.with_thread_budget(1; only = (:probe,)) do
-            @test thread_limit(:probe) == 1
-            @test thread_limit(:blas) == typemax(Int)
+        NT.with_thread_limit(1; only = (:probe,)) do
+            @test NT.thread_limit(:probe) == 1
+            @test NT.thread_limit(:blas) === nothing
         end
 
         # Soft defaults and grants bound nothing, so they do not count.
         NT.with_thread_default(1) do
-            @test thread_limit(:probe) == typemax(Int)
+            @test NT.thread_limit(:probe) === nothing
             NT.with_thread_grant(4) do
-                @test thread_limit(:probe) == typemax(Int)
+                @test NT.thread_limit(:probe) === nothing
             end
         end
-        NT.with_thread_budget(2) do
+        NT.with_thread_limit(2) do
             NT.with_thread_grant(4) do
-                @test thread_limit(:probe) == 2
+                @test NT.thread_limit(:probe) == 2
             end
         end
 
         # A limit another task holds is not this task's: it may close at any moment.
         opened, release = Channel{Nothing}(1), Channel{Nothing}(1)
-        holder = Threads.@spawn with_restricted_threads() do
+        holder = Threads.@spawn with_threads_disabled() do
             put!(opened, nothing)
             take!(release)
         end
         take!(opened)
-        @test thread_limit(:probe) == typemax(Int)
+        @test NT.thread_limit(:probe) === nothing
         put!(release, nothing)
         wait(holder)
     end
@@ -621,33 +780,33 @@ end
     Probe.reset!()
     # On 1.10 every scope is entered; the fast path needs `ScopedValue`.
     skips = VERSION >= v"1.11"
-    with_restricted_threads() do
+    with_threads_disabled() do
         applied = copy(Probe.APPLIED[])
         guarded = copy(Probe.BUDGETS[])
         active = length(NT.ACTIVE)
         # Same or larger budget, every pool already held at 1 by this enclosing scope: a
         # no-op, so nothing is entered, no counted pool is set and no guard runs again.
-        @test with_restricted_threads(() -> length(NT.ACTIVE)) == active + !skips
-        @test NT.with_thread_budget(() -> length(NT.ACTIVE), 3) == active + !skips
+        @test with_threads_disabled(() -> length(NT.ACTIVE)) == active + !skips
+        @test NT.with_thread_limit(() -> length(NT.ACTIVE), 3) == active + !skips
         # ...and the same inside a task spawned in the scope, a batch-loop worker's case.
-        @test fetch(Threads.@spawn with_restricted_threads(() -> length(NT.ACTIVE))) == active + !skips
+        @test fetch(Threads.@spawn with_threads_disabled(() -> length(NT.ACTIVE))) == active + !skips
         if skips
             @test Probe.APPLIED[] == applied
             @test Probe.BUDGETS[] == guarded
         end
         @test Probe.VALUE[] == 1
         # The body's value and exceptions still come through.
-        @test with_restricted_threads(() -> 42) == 42
-        @test_throws ErrorException with_restricted_threads(() -> error("boom"))
+        @test with_threads_disabled(() -> 42) == 42
+        @test_throws ErrorException with_threads_disabled(() -> error("boom"))
         @test length(NT.ACTIVE) == active
     end
     @test isempty(NT.ACTIVE)
     @test Probe.VALUE[] == 16
 
     # A smaller budget is entered.
-    NT.with_thread_budget(4) do
+    NT.with_thread_limit(4) do
         active = length(NT.ACTIVE)
-        NT.with_thread_budget(2) do
+        NT.with_thread_limit(2) do
             @test length(NT.ACTIVE) == active + 1
             @test Probe.VALUE[] == 2
         end
@@ -655,18 +814,18 @@ end
     end
 
     # An outer limit that leaves a pool out does not make the inner one a no-op.
-    NT.with_thread_budget(1; exclude = (:probe,)) do
+    NT.with_thread_limit(1; exclude = (:probe,)) do
         active = length(NT.ACTIVE)
-        with_restricted_threads() do
+        with_threads_disabled() do
             @test length(NT.ACTIVE) == active + 1
             @test Probe.VALUE[] == 1
         end
         @test Probe.VALUE[] == 16
     end
     # ...but an inner one confined to the pools the outer covers is.
-    NT.with_thread_budget(1; only = (:probe,)) do
+    NT.with_thread_limit(1; only = (:probe,)) do
         active = length(NT.ACTIVE)
-        NT.with_thread_budget(1; only = (:probe,)) do
+        NT.with_thread_limit(1; only = (:probe,)) do
             @test length(NT.ACTIVE) == active + !skips
         end
     end
@@ -674,7 +833,7 @@ end
     # A soft default around the call is not a hard limit, so the inner limit is entered.
     NT.with_thread_default(1) do
         active = length(NT.ACTIVE)
-        with_restricted_threads() do
+        with_threads_disabled() do
             @test length(NT.ACTIVE) == active + 1
         end
     end
@@ -682,12 +841,12 @@ end
     # A limit an unrelated task holds does not make this task's limit a no-op: it is entered,
     # and stays in force after the other task's scope closes.
     opened, release = Channel{Nothing}(1), Channel{Nothing}(1)
-    holder = Threads.@spawn with_restricted_threads() do
+    holder = Threads.@spawn with_threads_disabled() do
         put!(opened, nothing)
         take!(release)
     end
     take!(opened)
-    with_restricted_threads() do
+    with_threads_disabled() do
         @test length(NT.ACTIVE) == 2
         put!(release, nothing)
         wait(holder)
@@ -695,4 +854,234 @@ end
     end
     @test isempty(NT.ACTIVE)
     @test Probe.VALUE[] == 16
+end
+
+@testitem "a throwing hook is skipped, reported once, and corrupts nothing" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging, LinearAlgebra
+    const NT = NestedThreading
+    Probe.reset!()
+    const W = Logging.Warn
+
+    # `const`, not plain globals: the pools stay registered for the rest of the process, so
+    # their hooks must go on seeing live values (see "registering mid-scope joins the active
+    # restriction"). Each failure kind gets a pool of its own, because only the first failure
+    # of a pool is reported as a warning.
+    const fail_park = Ref(false)
+    const fail_set = Ref(false)
+    const fail_get = Ref(false)
+    const park_value = Ref(8)
+    const set_value = Ref(8)
+    const get_value = Ref(8)
+    const parked_after = Ref(0)
+    NT.register_pool!(
+        :failing_park; get = () -> park_value[], set = n -> (park_value[] = n),
+        park = () -> (fail_park[] && error("park failed"); nothing),
+    )
+    NT.register_pool!(
+        :failing_set; get = () -> set_value[],
+        set = n -> (fail_set[] && error("set failed"); set_value[] = n),
+    )
+    NT.register_pool!(
+        :failing_get; get = () -> (fail_get[] && error("get failed"); get_value[]),
+        set = n -> (get_value[] = n), park = () -> (parked_after[] += 1; nothing),
+    )
+    blas = BLAS.get_num_threads()
+
+    try
+        # A `set` that throws on entry and on exit: every other pool is still set and
+        # restored, no entry is left behind, and the body's value comes back.
+        fail_set[] = true
+        result = @test_logs (:warn, r"The `set` hook of pool :failing_set threw") match_mode = :any with_thread_limit(2) do
+            @test Probe.VALUE[] == 2
+            @test get_value[] == 2              # registered after the failing pool
+            :body
+        end
+        @test result === :body
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        @test get_value[] == 8
+        @test set_value[] == 8
+        @test BLAS.get_num_threads() == blas
+
+        # Reported once per pool: the next failure is logged at debug level only.
+        @test_logs min_level = W with_thread_limit(() -> nothing, 2)
+        @test_logs (:debug, r"hook of pool :failing_set threw again") min_level = Logging.Debug match_mode = :any with_thread_limit(
+            () -> nothing, 2
+        )
+        # An exception from the body passes through unchanged.
+        @test_throws "body failed" with_thread_limit(() -> error("body failed"), 2)
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        fail_set[] = false
+
+        # A `get` that throws while snapshotting: the pool keeps its previous snapshot and is
+        # restored to it.
+        fail_get[] = true
+        @test_logs (:warn, r"The `get` hook of pool :failing_get threw") match_mode = :any with_thread_limit(2) do
+            @test get_value[] == 2
+        end
+        @test get_value[] == 8
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        # `thread_pool_info` reports the count as unknown and describes every other pool.
+        info = thread_pool_info(:failing_get)
+        @test info.current === info.unrestricted === info.effective === nothing
+        @test thread_pool_info(:probe).current == 16
+        @test length(thread_pool_info()) == length(NT.POOL_NAMES[])
+        fail_get[] = false
+        @test thread_pool_info(:failing_get).current == 8
+
+        # A `park` hook that throws: the park hooks after it still run.
+        if NT.capacity() > 1
+            fail_park[] = true
+            with_thread_default(1; only = (:failing_park, :failing_get)) do
+                @test_logs (:warn, r"The `park` hook of pool :failing_park threw") match_mode = :any with_thread_grant(
+                    () -> nothing, NT.capacity(); only = (:failing_park, :failing_get)
+                )
+            end
+            @test parked_after[] == 1
+            @test isempty(NT.ACTIVE)
+            @test park_value[] == 8
+        end
+    finally
+        fail_park[] = fail_set[] = fail_get[] = false
+    end
+end
+
+@testitem "a throwing guard or quiesce hook never changes what the body did" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging
+    const NT = NestedThreading
+    Probe.reset!()
+    const D = Logging.Debug
+
+    # `const` for the same reason as in "a throwing hook is skipped, reported once, and
+    # corrupts nothing": these pools stay registered.
+    const fail_quiesce = Ref(false)
+    const quiesced_after = Ref(0)
+    NT.register_pool!(
+        :failing_quiesce; quiesce = () -> (fail_quiesce[] && error("quiesce failed"); nothing)
+    )
+    NT.register_pool!(:quiesce_after_failing; quiesce = () -> (quiesced_after[] += 1; nothing))
+
+    # `:ok` runs the body like any guard; the others are the ways a guard can break.
+    const guard_mode = Ref(:ok)
+    function failing_guard(f, n)
+        mode = guard_mode[]
+        mode === :before && error("guard failed before the body")
+        mode === :skip && return :not_the_body
+        value = try
+            f()
+        catch
+            mode === :replace && error("guard replaced the body's exception")
+            mode === :swallow && return :swallowed
+            rethrow()
+        end
+        mode === :after && error("guard failed after the body")
+        return value
+    end
+    NT.register_pool!(:failing_guard; guard = failing_guard)
+
+    try
+        # Quiesce: the failing hook is skipped, the hooks after it still run, the loop runs.
+        fail_quiesce[] = true
+        @test_logs (:warn, r"The `quiesce` hook of pool :failing_quiesce threw") NT.quiesce_foreign_pools()
+        @test quiesced_after[] == 1
+        @test Probe.quiesce_count() == 1
+        out = zeros(Int, 8)
+        @budgeted_threads for i in 1:8
+            out[i] = i
+        end
+        @test out == 1:8
+        @test quiesced_after[] == 2
+        fail_quiesce[] = false
+
+        if NT.capacity() > 1
+            runs = Ref(0)
+            body() = (runs[] += 1; :body)
+
+            # A guard that throws before the body: the body runs once, without it.
+            guard_mode[] = :before
+            @test (
+                @test_logs (:warn, r"The `guard` hook of pool :failing_guard threw") with_thread_limit(
+                    body, 1
+                )
+            ) === :body
+            @test runs[] == 1
+            @test Probe.guarded()                   # the other guard still ran
+            @test isempty(NT.ACTIVE)
+
+            # The pool has warned once; later failures are logged at debug level.
+            for mode in (:after, :skip)
+                guard_mode[] = mode
+                @test (
+                    @test_logs (:debug, r"hook of pool :failing_guard threw again") min_level = D match_mode = :any with_thread_limit(
+                        body, 1
+                    )
+                ) === :body
+            end
+            @test runs[] == 3                       # once per call, never twice
+
+            # The body's exception is what propagates, whatever the guard does with it.
+            for mode in (:ok, :replace, :swallow)
+                guard_mode[] = mode
+                @test_throws "body failed" with_thread_limit(() -> error("body failed"), 1)
+                @test isempty(NT.ACTIVE)
+            end
+            @test Probe.VALUE[] == 16
+        end
+    finally
+        fail_quiesce[] = false
+        guard_mode[] = :ok
+    end
+end
+
+@testitem "quiet skips are logged at debug level" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging
+    const NT = NestedThreading
+    Probe.reset!()
+    const D = Logging.Debug
+    noop() = nothing
+
+    # Unknown names stay legal (the library may register later) but are reported.
+    @test_logs (:debug, r"No pool named :no_such_pool is registered") min_level = D match_mode = :any with_thread_limit(
+        noop, 2; exclude = (:no_such_pool,)
+    )
+    @test_logs (:debug, r"No pool named :no_such_pool is registered") min_level = D match_mode = :any with_thread_default(
+        noop, 2; only = (:probe, :no_such_pool)
+    )
+    @test_logs (:debug, r"thread_limit: no pool named :no_such_pool") min_level = D NT.thread_limit(
+        :no_such_pool
+    )
+    @test (
+        @test_logs (:debug, r"thread_pool_info: no pool named :no_such_pool") min_level = D thread_pool_info(
+            :no_such_pool
+        )
+    ) === nothing
+    # Registered names, and a count of at least 1, are not reported.
+    @test_logs min_level = D with_thread_limit(noop, 2; exclude = (:probe,))
+    @test_logs min_level = D NT.thread_limit(:probe)
+    @test_logs min_level = D thread_pool_info(:probe)
+
+    @test_logs (:debug, r"Thread count 0 raised to 1") min_level = D match_mode = :any with_thread_limit(
+        noop, 0
+    )
+
+    # A grant that lowers a pool under a partial hard limit does not park it.
+    if NT.capacity() > 2
+        with_thread_limit(2) do
+            with_thread_default(1; only = (:probe,)) do
+                @test_logs (:debug, r"Pool :probe not parked") min_level = D match_mode = :any with_thread_grant(
+                    noop, NT.capacity(); only = (:probe,)
+                )
+            end
+        end
+        @test Probe.park_count() == 0
+    end
+
+    # A guard registered inside an open scope applies only to later scopes.
+    @test_logs (:debug, r"Guard of pool :debug_guard registered while a scope is open") min_level = D match_mode = :any with_thread_limit(
+        1
+    ) do
+        NT.register_pool!(:debug_guard; guard = (f, n) -> f())
+    end
 end

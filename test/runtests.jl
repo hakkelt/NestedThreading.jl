@@ -6,7 +6,7 @@ using TestItemRunner
 #   julia --project=test test/runtests.jl :benchmark   # the local-only benchmarks
 #   julia --project=test test/runtests.jl "@budgeted_batch does not disable its own loop"
 #
-# Tags: :registry, :macros, :extensions, :jet, :benchmark.
+# Tags: :registry, :macros, :extensions, :jet, :aqua, :benchmark.
 #
 # The benchmark items are excluded by default: they compare wall-clock times and so are
 # meaningful only on an otherwise idle machine, not in CI.

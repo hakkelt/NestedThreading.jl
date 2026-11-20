@@ -89,12 +89,12 @@ function _reject_parallel_chain(chain, macroname, emitted)
     return nothing
 end
 
-# A loop that is itself a `Polyester.@batch` is the Polyester pool's own region, so quiescing
-# it would only make it re-acquire its workers a line later. Every other loop here runs on
-# Julia's scheduler and must not open while a foreign pool is still spinning on its threads —
-# see `QuiescePool`.
+# Every loop here runs on Julia's threads (a `Polyester.@batch` loop's workers too) and must not
+# open while a foreign pool is still spinning on them; see `register_pool!`. The pools in
+# `exclude` are not quiesced: around a `@batch` loop that is Polyester, whose region the loop
+# is, so quiescing it would only make it re-acquire its workers a line later.
 _quiesce_expr(exclude::Tuple) =
-    :polyester in exclude ? nothing : :($(GlobalRef(NestedThreading, :quiesce_foreign_pools))())
+    :($(GlobalRef(NestedThreading, :_quiesce_foreign_pools))($exclude))
 
 function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity)
     var, range, body = _split_for(loop)
@@ -104,7 +104,7 @@ function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity
     return quote
         let $rangevar = $range,
                 $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
-            $(GlobalRef(NestedThreading, :with_thread_budget))(
+            $(GlobalRef(NestedThreading, :with_thread_limit))(
                 $budgetvar; exclude = $exclude
             ) do
                 $quiesce
@@ -129,7 +129,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
         let $rangevar = $range
             if $cond
                 let $budgetvar = $(GlobalRef(NestedThreading, :budget_for))($rangevar)
-                    $(GlobalRef(NestedThreading, :with_thread_budget))(
+                    $(GlobalRef(NestedThreading, :with_thread_limit))(
                         $budgetvar; exclude = $exclude
                     ) do
                         $quiesce
@@ -137,7 +137,7 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
                     end
                 end
             else
-                $(GlobalRef(NestedThreading, :with_restricted_threads))() do
+                $(GlobalRef(NestedThreading, :with_threads_disabled))() do
                     $sequential
                 end
             end
@@ -145,28 +145,36 @@ function _switched_expr(cond, loop::Expr, chain, mkparallel, exclude::Tuple)
     end
 end
 
-# `@budgeted_threads [threads = expr] for ... end`
+# `@budgeted_threads [options...] [threads = expr] for ... end`: `threads = expr` is this
+# package's switch; every other argument before the loop is an option of the emitted parallel
+# macro and is handed to it unchanged, in order. Neither `Threads.@threads` nor
+# `Polyester.@batch` has an option named `threads`, so the two cannot collide.
 function _parse_switched(args, macroname)
     cond = true
+    options = Any[]
     loop = nothing
     for arg in args
+        arg isa LineNumberNode && continue
+        loop === nothing ||
+            error("NestedThreading: `$macroname` expects the loop last, got `$arg` after it")
         if arg isa Expr && arg.head === :(=) && arg.args[1] === :threads
             cond = arg.args[2]
         elseif arg isa Expr && (arg.head === :for || arg.head === :macrocall)
             loop = arg
-        elseif !(arg isa LineNumberNode)
-            error("NestedThreading: `$macroname` got unexpected argument `$arg`")
+        else
+            push!(options, arg)
         end
     end
     loop === nothing && error("NestedThreading: `$macroname` $_MACRO_ERROR")
-    return cond, loop
+    return cond, options, loop
 end
 
 """
     @budgeted <parallel-loop>
 
 Wrap an already-chosen parallel loop so that its body runs with inner threaded libraries
-limited to `budget_for(range)` threads. The loop construct is emitted unchanged — this
+limited to `max(1, capacity() ÷ length(range))` threads, or 1 for an iterator of unknown
+length (see [`NestedThreading.capacity`](@ref)). The loop construct is emitted unchanged — this
 macro never decides *whether* to parallelize, only what budget the workers get.
 
 ```julia
@@ -179,7 +187,8 @@ Accepts any chain of macros ending in a single `for x in range` loop, so
 `Threads.@threads :static for`, `@inbounds Polyester.@batch for`, and
 `@batch minbatch=64 for` all work. The range expression is hoisted into a temporary and
 evaluated exactly once. A chain containing `@batch` automatically excludes the `:polyester`
-pool, since there the loop being budgeted is itself the Polyester consumer.
+pool, since there the loop being budgeted is itself the Polyester consumer. The expression
+evaluates to `nothing`.
 
 See also [`@budgeted_threads`](@ref), [`@budgeted_batch`](@ref).
 """
@@ -194,59 +203,122 @@ macro budgeted(ex)
 end
 
 """
-    @budgeted_threads [threads = <bool>] for x in range ... end
+    @budgeted_threads [schedule] [threads = <bool>] for x in range ... end
 
 `Threads.@threads` over `range` with an automatic inner thread budget, plus a runtime
 switch for whether to parallelize at all.
 
+Every argument before the loop other than `threads = ...` is passed to `Threads.@threads`
+unchanged and in order; in practice that is the schedule (`:dynamic`, `:static` or
+`:greedy`): `@budgeted_threads :static threads = flag for ...`. Any other `name = value`
+option is an error at expansion, since `Threads.@threads` takes no keyword options.
+
 * `threads = true` (the default when omitted) runs `Threads.@threads` with the body's
-  inner libraries limited to `budget_for(range)`.
+  inner libraries limited to `max(1, capacity() ÷ length(range))` threads, or 1 for an
+  iterator of unknown length.
 * `threads = false` runs a plain sequential loop with inner libraries limited to a single
   thread, on the assumption that a caller who switched threading off did so because
-  concurrency is happening somewhere else.
+  concurrency is happening somewhere else. The schedule does not apply to it.
 
 Body-level macros such as `@inbounds` may wrap the loop; they are rebuilt around the
 emitted `Threads.@threads`. A macro that parallelizes the loop itself (`Threads.@threads`,
 `Polyester.@batch`, `@distributed`, …) is rejected at expansion, since this macro emits one
 already — use [`@budgeted`](@ref) to budget a parallel loop you have written yourself.
 `@budgeted` is also the way to combine this with a macro that insists on being handed a
-bare `for` loop, such as `@simd`.
+bare `for` loop, such as `@simd`. The expression evaluates to `nothing`.
+
+```jldoctest
+julia> squares = zeros(Int, 4);
+
+julia> @budgeted_threads :static for i in 1:4
+           squares[i] = i^2
+       end
+
+julia> squares
+4-element Vector{Int64}:
+  1
+  4
+  9
+ 16
+
+julia> parallel = false;
+
+julia> limits = zeros(Int, 4);
+
+julia> @budgeted_threads threads = parallel for i in 1:4
+           limits[i] = NestedThreading.thread_limit(:blas)   # the inner budget
+       end
+
+julia> limits
+4-element Vector{Int64}:
+ 1
+ 1
+ 1
+ 1
+```
 """
 macro budgeted_threads(args...)
-    cond, ex = _parse_switched(args, "@budgeted_threads")
+    cond, options, ex = _parse_switched(args, "@budgeted_threads")
+    for option in options
+        option isa Expr && option.head === :(=) && error(
+            "NestedThreading: `@budgeted_threads` got the option `$option`, but " *
+                "`Threads.@threads` takes no keyword options; the switch is " *
+                "`threads = <Bool>`."
+        )
+    end
     chain, loop = _peel_macros(ex)
     _reject_parallel_chain(chain, "@budgeted_threads", "Threads.@threads")
     mk = body -> Expr(
         :macrocall,
         Expr(:., Expr(:., :Base, QuoteNode(:Threads)), QuoteNode(Symbol("@threads"))),
         __source__,
+        options...,
         body,
     )
     return esc(_switched_expr(cond, loop, chain, mk, ()))
 end
 
 """
-    @budgeted_batch [threads = <bool>] for x in range ... end
+    @budgeted_batch [options...] [threads = <bool>] for x in range ... end
 
 Polyester `@batch` over `range` with an automatic inner thread budget and the same
 `threads =` switch as [`@budgeted_threads`](@ref).
+
+Every other argument before the loop is passed to `@batch` unchanged and in order, so its
+options combine with the switch: `@budgeted_batch minbatch = 64 threads = flag for ...`. The
+sequential `threads = false` loop ignores them.
 
 The calling module must have `Polyester` available (`import Polyester`), since the
 expansion emits `Polyester.@batch`. The `:polyester` pool is excluded from the budget scope
 so that the generated `@batch` loop is not disabled by its own restriction.
 
 As with [`@budgeted_threads`](@ref), a chain that already parallelizes the loop is rejected
-at expansion; pass `@batch`'s own options to [`@budgeted`](@ref) instead
-(`@budgeted Polyester.@batch minbatch=64 for ...`).
+at expansion. The expression evaluates to `nothing`.
+
+```jldoctest
+julia> import Polyester
+
+julia> total = Threads.Atomic{Int}(0);
+
+julia> parallel = true;
+
+julia> @budgeted_batch minbatch = 2 threads = parallel for i in 1:8
+           Threads.atomic_add!(total, i)
+       end
+
+julia> total[]
+36
+```
 """
 macro budgeted_batch(args...)
-    cond, ex = _parse_switched(args, "@budgeted_batch")
+    cond, options, ex = _parse_switched(args, "@budgeted_batch")
     chain, loop = _peel_macros(ex)
     _reject_parallel_chain(chain, "@budgeted_batch", "Polyester.@batch")
     mk = body -> Expr(
         :macrocall,
         Expr(:., :Polyester, QuoteNode(Symbol("@batch"))),
         __source__,
+        options...,
         body,
     )
     return esc(_switched_expr(cond, loop, chain, mk, (:polyester,)))

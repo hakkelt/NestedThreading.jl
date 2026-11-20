@@ -7,14 +7,14 @@ inner threading — Julia's answer to Python's `threadpoolctl`.
 
 The entry points are [`@budgeted_threads`](@ref) / [`@budgeted_batch`](@ref) for loops,
 [`@budgeted`](@ref) for a loop construct you want to keep exactly as written, and
-[`with_restricted_threads`](@ref) / [`with_full_threads`](@ref) for call sites that are not
+[`with_threads_disabled`](@ref) / [`with_threads_enabled`](@ref) for call sites that are not
 loops. Libraries register themselves through package extensions; see
-[`register_counted_pool!`](@ref) to add one this package does not ship.
+[`register_pool!`](@ref) to add one this package does not ship.
 
 Budgeting is one half of the problem. The other is that a library's workers can go on
 *occupying* Julia's threads after its own parallel region has ended, so that a
 `Threads.@threads` region opened next waits for them instead of running on them — 38x on the
-measurement in [`QuiescePool`](@ref). The loop macros here handle that for themselves;
+measurement in [`register_pool!`](@ref). The loop macros here handle that for themselves;
 [`quiesce_foreign_pools`](@ref) is the same thing for a parallel region written by hand.
 """
 module NestedThreading
@@ -24,17 +24,15 @@ using Libdl: Libdl
 using LinearAlgebra: BLAS
 
 export @budgeted, @budgeted_threads, @budgeted_batch,
-    with_restricted_threads, with_full_threads, enable_full_threading,
-    quiesce_foreign_pools, thread_limit
+    with_threads_disabled, with_threads_enabled, with_thread_limit,
+    with_thread_default, with_thread_grant, thread_pool_info
 
 @static if VERSION >= v"1.11"
     eval(
         Expr(
             :public,
-            :with_thread_budget, :with_thread_default, :with_thread_grant,
-            :register_counted_pool!, :register_guarded_pool!, :register_quiesce_pool!,
-            :register_park_hook!, :CountedPool, :GuardedPool, :QuiescePool, :ParkHook,
-            :park_openblas, :capacity, :budget_for,
+            :register_pool!, :capacity, :thread_limit, :quiesce_foreign_pools,
+            :reset_thread_counts!,
         )
     )
 end
@@ -47,7 +45,7 @@ include("macros.jl")
     park_openblas()
 
 Shut OpenBLAS's worker threads down, if OpenBLAS is the BLAS libblastrampoline currently
-forwards to; do nothing otherwise. Registered as the `:blas` [`ParkHook`](@ref).
+forwards to; do nothing otherwise. Registered as the `park` hook of the `:blas` pool.
 
 Lowering OpenBLAS's thread count leaves its now-unused workers spinning for
 `OPENBLAS_THREAD_TIMEOUT` before they sleep, on the cores the caller's own threads want next.
@@ -74,6 +72,10 @@ function park_openblas()
         handle = Libdl.dlopen(lib.libname; throw_error = false)
         handle === nothing && continue
         shutdown = Libdl.dlsym(handle, :blas_thread_shutdown_; throw_error = false)
+        # Logged with the registry lock held, since this runs as a park hook: a logger that
+        # waits for another task opening a scope would deadlock here.
+        shutdown === nothing &&
+            @debug "`blas_thread_shutdown_` not found in $(lib.libname); its threads were not shut down."
         shutdown === nothing || ccall(shutdown, Cint, ())
         Libdl.dlclose(handle)
     end
@@ -81,8 +83,9 @@ function park_openblas()
 end
 
 function __init__()
-    register_counted_pool!(BLAS.get_num_threads, BLAS.set_num_threads; name = :blas)
-    register_park_hook!(park_openblas; name = :blas)
+    register_pool!(
+        :blas; get = BLAS.get_num_threads, set = BLAS.set_num_threads, park = park_openblas
+    )
     return nothing
 end
 

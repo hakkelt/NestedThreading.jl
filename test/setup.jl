@@ -2,8 +2,8 @@
 Synthetic pools that make the applied budget observable without depending on how a real
 library clamps thread counts.
 
-Registered once per test process (the module body runs once, and registration is a no-op
-for a name that already exists). Both pools stay registered for the whole session on
+Registered once per test process (the module body runs once; registering a name twice
+throws). Both pools stay registered for the whole session on
 purpose — that is exactly the state a downstream package would see.
 """
 @testmodule Probe begin
@@ -27,29 +27,27 @@ purpose — that is exactly the state a downstream package would see.
     # Park hook of the counted pool: counts how often it ran.
     const PARKED = Threads.Atomic{Int}(0)
 
+    function guard(f, budget)
+        @lock LOCK push!(BUDGETS[], budget)
+        Threads.atomic_add!(DEPTH, 1)
+        try
+            return f()
+        finally
+            Threads.atomic_sub!(DEPTH, 1)
+        end
+    end
+
     function register!()
-        NT.register_counted_pool!(
-            () -> VALUE[],
-            n -> (VALUE[] = n; @lock LOCK push!(APPLIED[], n); n);
-            name = :probe,
+        NT.register_pool!(
+            :probe;
+            get = () -> VALUE[],
+            set = n -> (VALUE[] = n; @lock LOCK push!(APPLIED[], n); n),
+            park = () -> (Threads.atomic_add!(PARKED, 1); nothing),
         )
-        NT.register_guarded_pool!(name = :probe_guard) do f, budget
-            @lock LOCK push!(BUDGETS[], budget)
-            Threads.atomic_add!(DEPTH, 1)
-            try
-                f()
-            finally
-                Threads.atomic_sub!(DEPTH, 1)
-            end
-        end
-        NT.register_park_hook!(name = :probe) do
-            Threads.atomic_add!(PARKED, 1)
-            nothing
-        end
-        return NT.register_quiesce_pool!(name = :probe_quiesce) do
-            Threads.atomic_add!(QUIESCED, 1)
-            nothing
-        end
+        NT.register_pool!(:probe_guard; guard)
+        return NT.register_pool!(
+            :probe_quiesce; quiesce = () -> (Threads.atomic_add!(QUIESCED, 1); nothing)
+        )
     end
 
     register!()

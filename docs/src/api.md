@@ -12,36 +12,28 @@ NestedThreading
 @budgeted_batch
 ```
 
-## Scoped budgets
+## Scopes
 
 ```@docs
-with_restricted_threads
-with_full_threads
-enable_full_threading
-NestedThreading.with_thread_budget
-NestedThreading.with_thread_default
-NestedThreading.with_thread_grant
-thread_limit
+with_threads_disabled
+with_threads_enabled
+with_thread_limit
+with_thread_default
+with_thread_grant
+NestedThreading.thread_limit
+NestedThreading.reset_thread_counts!
 ```
 
 ## Registry
 
 ```@docs
-NestedThreading.register_counted_pool!
-NestedThreading.register_guarded_pool!
-NestedThreading.register_quiesce_pool!
-NestedThreading.register_park_hook!
-NestedThreading.CountedPool
-NestedThreading.GuardedPool
-NestedThreading.QuiescePool
-NestedThreading.ParkHook
-NestedThreading.park_openblas
+NestedThreading.register_pool!
+thread_pool_info
 NestedThreading.capacity
-NestedThreading.budget_for
 ```
 
 ## Releasing Julia's threads
 
 ```@docs
-quiesce_foreign_pools
+NestedThreading.quiesce_foreign_pools
 ```
