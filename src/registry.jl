@@ -213,8 +213,9 @@ The first failure of each pool is logged with `@warn`, later ones at debug level
 
 Registration is checked strictly. It throws an `ArgumentError` for a `name` that is already
 registered, for `get` without `set` or `set` without `get`, for `park` without `get`/`set`,
-for no control at all, and when `get()` does not return an `Integer`. A failed call registers
-nothing.
+for no control at all, and when `get()` does not return an `Integer`. An exception thrown by
+`get()` at registration, or by `set` when a scope is open (see below), propagates unchanged.
+A failed call registers nothing.
 
 Registration is expected to happen at load time (`__init__`), but an extension may be loaded
 while some task has a scope open. A newly registered count then takes its current value as
@@ -326,14 +327,15 @@ function register_pool!(
             )
             current = Int(value)
         end
+        # Apply the restriction currently in force to the newcomer before anything is
+        # recorded, so that a `set` that throws leaves the registry untouched.
+        get === nothing || isempty(ACTIVE) || set(_effective_budget(name, current))
         POOL_NAMES[] = [POOL_NAMES[]; name]
         if get !== nothing
             push!(COUNTED_POOLS, CountedPool(name, get, set, park))
             push!(MAXIMA, current)
-            # Keep SAVED aligned with COUNTED_POOLS even when registering mid-scope, and
-            # apply the restriction currently in force to the newcomer.
+            # Keep SAVED aligned with COUNTED_POOLS even when registering mid-scope.
             push!(SAVED, current)
-            isempty(ACTIVE) || set(_effective_budget(name, current))
         end
         guard === nothing || push!(GUARDED_POOLS, GuardedPool(name, guard))
         quiesce === nothing || push!(QUIESCE_POOLS, QuiescePool(name, quiesce))

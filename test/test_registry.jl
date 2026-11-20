@@ -171,6 +171,25 @@ end
         nothing
     end
     @test late_guarded[] == 1
+
+    # A `set` that throws while a scope is open fails the registration and records nothing:
+    # the name stays free.
+    state() = (
+        copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
+        length(NT.QUIESCE_POOLS), copy(NT.SAVED), copy(NT.MAXIMA),
+    )
+    NT.with_thread_limit(1) do
+        before = state()
+        @test_throws "set refused" NT.register_pool!(
+            :refusing_probe; get = () -> 4, set = n -> error("set refused"),
+            quiesce = () -> nothing,
+        )
+        @test state() == before
+        @test length(NT.ACTIVE) == 1
+    end
+    @test !(:refusing_probe in NT.POOL_NAMES[])
+    @test isempty(NT.ACTIVE)
+    @test Probe.VALUE[] == 16
 end
 
 @testitem "scoped save/apply/restore" tags = [:registry] setup = [Probe] begin
