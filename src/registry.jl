@@ -39,9 +39,11 @@ struct QuiescePool
     quiesce::Any
 end
 
-# Every registered name, whatever its controls, and every quiesce hook. Both replaced, never
-# mutated, under REGISTRY_LOCK, so a reader without the lock (`thread_limit`,
-# `quiesce_foreign_pools`) gets a consistent vector by loading the `Ref` once.
+# Every registered name, whatever its controls, and every quiesce hook. Both are read without
+# REGISTRY_LOCK (`thread_limit`, `_debug_unknown_names`, `quiesce_foreign_pools`), so they
+# are replaced, never mutated, under the lock: a reader loads the `Ref` once and gets a
+# consistent vector. COUNTED_POOLS and GUARDED_POOLS are only touched with the lock held, so
+# they are mutated in place.
 const POOL_NAMES = Ref(Symbol[])
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
