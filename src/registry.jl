@@ -39,12 +39,13 @@ struct QuiescePool
     quiesce::Any
 end
 
-# Every registered name, whatever its controls. Replaced, never mutated, under REGISTRY_LOCK,
-# so a reader without the lock gets a consistent vector.
+# Every registered name, whatever its controls, and every quiesce hook. Both replaced, never
+# mutated, under REGISTRY_LOCK, so a reader without the lock (`thread_limit`,
+# `quiesce_foreign_pools`) gets a consistent vector by loading the `Ref` once.
 const POOL_NAMES = Ref(Symbol[])
 const COUNTED_POOLS = CountedPool[]
 const GUARDED_POOLS = GuardedPool[]
-const QUIESCE_POOLS = QuiescePool[]
+const QUIESCE_POOLS = Ref(QuiescePool[])
 
 # Parallel to COUNTED_POOLS:
 const MAXIMA = Int[]   # each pool's count at registration time (its unrestricted value)
@@ -338,7 +339,7 @@ function register_pool!(
             push!(SAVED, current)
         end
         guard === nothing || push!(GUARDED_POOLS, GuardedPool(name, guard))
-        quiesce === nothing || push!(QUIESCE_POOLS, QuiescePool(name, quiesce))
+        quiesce === nothing || (QUIESCE_POOLS[] = [QUIESCE_POOLS[]; QuiescePool(name, quiesce)])
         !isempty(ACTIVE)
     end
     scope_open && guard !== nothing &&
@@ -385,7 +386,7 @@ no-op when nothing is registered. It is safe to call when no foreign region has 
 workers stay parked.
 """
 @noinline function quiesce_foreign_pools()
-    for pool in QUIESCE_POOLS
+    for pool in QUIESCE_POOLS[]
         pool.quiesce()
     end
     return nothing
@@ -470,7 +471,7 @@ function _pool_info(name::Symbol)
     return PoolInfo(
         (
             name, i !== nothing, any(p -> p.name === name, GUARDED_POOLS),
-            any(p -> p.name === name, QUIESCE_POOLS), has_park, current, unrestricted,
+            any(p -> p.name === name, QUIESCE_POOLS[]), has_park, current, unrestricted,
             effective,
         )
     )

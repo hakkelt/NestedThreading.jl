@@ -30,14 +30,14 @@ end
     @test :blas in [p.name for p in NT.COUNTED_POOLS]
     @test :probe in [p.name for p in NT.COUNTED_POOLS]
     @test :probe_guard in [p.name for p in NT.GUARDED_POOLS]
-    @test :probe_quiesce in [p.name for p in NT.QUIESCE_POOLS]
+    @test :probe_quiesce in [p.name for p in NT.QUIESCE_POOLS[]]
     @test length(NT.SAVED) == length(NT.COUNTED_POOLS)
     @test length(NT.MAXIMA) == length(NT.COUNTED_POOLS)
 
     # Every rejected registration leaves the registry exactly as it was.
     state() = (
         copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
-        length(NT.QUIESCE_POOLS), length(NT.SAVED), length(NT.MAXIMA),
+        length(NT.QUIESCE_POOLS[]), length(NT.SAVED), length(NT.MAXIMA),
     )
     before = state()
     g() = 1
@@ -176,7 +176,7 @@ end
     # the name stays free.
     state() = (
         copy(NT.POOL_NAMES[]), length(NT.COUNTED_POOLS), length(NT.GUARDED_POOLS),
-        length(NT.QUIESCE_POOLS), copy(NT.SAVED), copy(NT.MAXIMA),
+        length(NT.QUIESCE_POOLS[]), copy(NT.SAVED), copy(NT.MAXIMA),
     )
     NT.with_thread_limit(1) do
         before = state()
