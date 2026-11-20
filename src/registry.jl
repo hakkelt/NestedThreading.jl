@@ -93,10 +93,12 @@ const REGISTRY_LOCK = ReentrantLock()
 # call made with REGISTRY_LOCK held goes through one of the helpers below: the failure is
 # recorded and the caller moves on to the next pool. The recorded failures are logged by
 # `_report_hook_failures` once the lock is released, so a logger never runs while it is held.
+# `quiesce` and `guard` hooks run without the lock and report through
+# `_report_hook_failure`.
 
 struct HookFailure
     pool::Symbol
-    hook::Symbol        # :get, :set or :park
+    hook::Symbol        # :get, :set, :park, :quiesce or :guard
     exception::Any
     backtrace::Any
     first::Bool         # the first failure of this pool: logged with `@warn`, later ones with `@debug`
@@ -149,6 +151,15 @@ function _take_hook_failures!()
     failures = copy(PENDING_FAILURES)
     empty!(PENDING_FAILURES)
     return failures
+end
+
+# Record and log the failure of a hook that ran without the lock held.
+@noinline function _report_hook_failure(pool::Symbol, hook::Symbol, exception, backtrace)
+    failures = @lock REGISTRY_LOCK begin
+        _record_failure!(pool, hook, exception, backtrace)
+        _take_hook_failures!()
+    end
+    return _report_hook_failures(failures)
 end
 
 _report_hook_failures(::Nothing) = nothing
@@ -206,11 +217,15 @@ The keywords are the controls a library can have; pass the ones it has:
   this library's count, to make the workers it no longer uses release the cores they are
   spinning on. Needs `get`/`set`. See "Parking" below.
 
-A hook that throws once registered is not fatal. When a `get`, `set` or `park` call throws,
-it is skipped: every other pool is still set, restored and parked, the scope's bookkeeping
-stays consistent, and the scope returns its body's value or rethrows its body's exception as
-if nothing had happened. A count whose `get` throws keeps the value it was last restored to.
-The first failure of each pool is logged with `@warn`, later ones at debug level.
+A hook that throws once registered is not fatal. When a `get`, `set`, `park` or `quiesce`
+call throws, it is skipped: every other pool is still set, restored, parked and quiesced, the
+scope's bookkeeping stays consistent, and the scope returns its body's value or rethrows its
+body's exception as if nothing had happened. A count whose `get` throws keeps the value it
+was last restored to. A `guard` that throws before calling `f`, or returns without calling
+it, is skipped and `f()` runs without it; one that throws after `f()` has returned still
+gives back `f()`'s value; and when `f()` itself throws, that exception is what propagates,
+whatever the guard throws while unwinding. The first failure of each pool is logged with
+`@warn`, later ones at debug level.
 
 Registration is checked strictly. It throws an `ArgumentError` for a `name` that is already
 registered, for `get` without `set` or `set` without `get`, for `park` without `get`/`set`,
@@ -389,7 +404,12 @@ quiesce_foreign_pools() = _quiesce_foreign_pools(())
 # Every quiesce hook except those of the pools named in `exclude`.
 @noinline function _quiesce_foreign_pools(exclude::Tuple)
     for pool in QUIESCE_POOLS[]
-        _name_in(pool.name, exclude) || pool.quiesce()
+        _name_in(pool.name, exclude) && continue
+        try
+            pool.quiesce()
+        catch exception
+            _report_hook_failure(pool.name, :quiesce, exception, catch_backtrace())
+        end
     end
     return nothing
 end

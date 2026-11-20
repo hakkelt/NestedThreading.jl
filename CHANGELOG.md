@@ -71,6 +71,10 @@ are internal now. Use `thread_pool_info()` instead of reading the registry's int
   replaces the scope body's result. The hook is skipped, the first failure of each pool is
   logged with `@warn` and later ones at the `Debug` level, and `thread_pool_info` reports
   a count whose `get` throws as `nothing`.
+- A `quiesce` or `guard` hook that throws no longer propagates out of the loop macros or
+  the scope. A failing `quiesce` is skipped. The body runs exactly once whatever its guard
+  does, the scope returns its value, and when the body throws, its exception is the one that
+  propagates. Failures are logged as above.
 - `register_pool!` called while a scope is open registers nothing when the new pool's
   `set` throws.
 - Registering a `quiesce` hook while another task runs a budgeted loop no longer races with

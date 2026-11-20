@@ -4,12 +4,58 @@
 # abstract `guard` call is the only dynamic dispatch and it stays out of the caller's
 # inlining. `guards` already reflects every currently-active restriction (including this one)
 # and its `exclude`/`only`, and holds only the pools whose budget is below `capacity()`.
+#
+# A guard that fails is skipped, never allowed to change what the body did: `GuardedCall`
+# tracks whether the body was entered and how it ended, so a throw from the guard itself can
+# be told apart from one coming out of the body.
+mutable struct GuardedCall
+    entered::Bool
+    returned::Bool
+    body_threw::Bool
+    value::Any
+    exception::Any
+    GuardedCall() = new(false, false, false, nothing, nothing)
+end
+
 @noinline function _run_guarded(f::F, guards::Vector{Tuple{GuardedPool,Int}}, i::Int) where {F}
     i > length(guards) && return f()
     pool, target = guards[i]
-    return pool.guard(target) do
-        _run_guarded(f, guards, i + 1)
+    call = GuardedCall()
+    try
+        value = pool.guard(target) do
+            call.entered = true
+            try
+                inner = _run_guarded(f, guards, i + 1)
+                call.value = inner
+                call.returned = true
+                return inner
+            catch exception
+                call.body_threw = true
+                call.exception = exception
+                rethrow()
+            end
+        end
+        call.entered && !call.body_threw && return value
+        _report_hook_failure(
+            pool.name, :guard,
+            ErrorException(
+                call.entered ? "the guard swallowed an exception thrown by the function it guards" :
+                    "the guard returned without calling the function it guards"
+            ),
+            backtrace(),
+        )
+        call.body_threw && throw(call.exception)
+    catch exception
+        if call.body_threw
+            exception === call.exception && rethrow()
+            _report_hook_failure(pool.name, :guard, exception, catch_backtrace())
+            throw(call.exception)
+        end
+        _report_hook_failure(pool.name, :guard, exception, catch_backtrace())
+        call.returned && return call.value
     end
+    # The guard failed before running the body: run it without this guard.
+    return _run_guarded(f, guards, i + 1)
 end
 
 """

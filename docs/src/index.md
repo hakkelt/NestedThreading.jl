@@ -125,9 +125,9 @@ with the `JULIA_DEBUG` environment variable, before or after loading it:
 ENV["JULIA_DEBUG"] = "NestedThreading"
 ```
 
-A library hook that throws (a registered `get`, `set` or `park`) is louder but still not
-fatal: the scope skips it, carries on with every other library, and returns or rethrows what
-its body did. The first failure of each library is logged as a warning, later ones at the
+A library hook that throws (any registered `get`, `set`, `park`, `quiesce` or `guard`) is
+louder but still not fatal: the scope skips it, carries on with every other library, and
+returns or rethrows what its body did. The first failure of each library is logged as a warning, later ones at the
 `Debug` level.
 
 ## Supported libraries

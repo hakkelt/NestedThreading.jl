@@ -948,6 +948,89 @@ end
     end
 end
 
+@testitem "a throwing guard or quiesce hook never changes what the body did" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging
+    const NT = NestedThreading
+    Probe.reset!()
+    const D = Logging.Debug
+
+    # `const` for the same reason as in "a throwing hook is skipped, reported once, and
+    # corrupts nothing": these pools stay registered.
+    const fail_quiesce = Ref(false)
+    const quiesced_after = Ref(0)
+    NT.register_pool!(
+        :failing_quiesce; quiesce = () -> (fail_quiesce[] && error("quiesce failed"); nothing)
+    )
+    NT.register_pool!(:quiesce_after_failing; quiesce = () -> (quiesced_after[] += 1; nothing))
+
+    # `:ok` runs the body like any guard; the others are the ways a guard can break.
+    const guard_mode = Ref(:ok)
+    function failing_guard(f, n)
+        mode = guard_mode[]
+        mode === :before && error("guard failed before the body")
+        mode === :skip && return :not_the_body
+        value = try
+            f()
+        catch
+            mode === :replace && error("guard replaced the body's exception")
+            mode === :swallow && return :swallowed
+            rethrow()
+        end
+        mode === :after && error("guard failed after the body")
+        return value
+    end
+    NT.register_pool!(:failing_guard; guard = failing_guard)
+
+    try
+        # Quiesce: the failing hook is skipped, the hooks after it still run, the loop runs.
+        fail_quiesce[] = true
+        @test_logs (:warn, r"The `quiesce` hook of pool :failing_quiesce threw") NT.quiesce_foreign_pools()
+        @test quiesced_after[] == 1
+        @test Probe.quiesce_count() == 1
+        out = zeros(Int, 8)
+        @budgeted_threads for i in 1:8
+            out[i] = i
+        end
+        @test out == 1:8
+        @test quiesced_after[] == 2
+        fail_quiesce[] = false
+
+        if NT.capacity() > 1
+            runs = Ref(0)
+            body() = (runs[] += 1; :body)
+
+            # A guard that throws before the body: the body runs once, without it.
+            guard_mode[] = :before
+            @test (@test_logs (:warn, r"The `guard` hook of pool :failing_guard threw") with_thread_limit(
+                body, 1
+            )) === :body
+            @test runs[] == 1
+            @test Probe.guarded()                   # the other guard still ran
+            @test isempty(NT.ACTIVE)
+
+            # The pool has warned once; later failures are logged at debug level.
+            for mode in (:after, :skip)
+                guard_mode[] = mode
+                @test (@test_logs (:debug, r"hook of pool :failing_guard threw again") min_level = D match_mode = :any with_thread_limit(
+                    body, 1
+                )) === :body
+            end
+            @test runs[] == 3                       # once per call, never twice
+
+            # The body's exception is what propagates, whatever the guard does with it.
+            for mode in (:ok, :replace, :swallow)
+                guard_mode[] = mode
+                @test_throws "body failed" with_thread_limit(() -> error("body failed"), 1)
+                @test isempty(NT.ACTIVE)
+            end
+            @test Probe.VALUE[] == 16
+        end
+    finally
+        fail_quiesce[] = false
+        guard_mode[] = :ok
+    end
+end
+
 @testitem "quiet skips are logged at debug level" tags = [:registry] setup = [Probe] begin
     using NestedThreading, Logging
     const NT = NestedThreading
