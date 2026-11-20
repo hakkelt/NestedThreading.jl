@@ -17,7 +17,7 @@ mutable struct GuardedCall
     GuardedCall() = new(false, false, false, nothing, nothing)
 end
 
-@noinline function _run_guarded(f::F, guards::Vector{Tuple{GuardedPool,Int}}, i::Int) where {F}
+@noinline function _run_guarded(f::F, guards::Vector{Tuple{GuardedPool, Int}}, i::Int) where {F}
     i > length(guards) && return f()
     pool, target = guards[i]
     call = GuardedCall()
@@ -165,8 +165,8 @@ regime; see [`register_pool!`](@ref). [`@budgeted_batch`](@ref) uses
     limitation of the underlying C libraries, not something this package can solve.
 """
 function with_thread_limit(
-    f::F, n::Integer; exclude = (), only = nothing
-) where {F}
+        f::F, n::Integer; exclude = (), only = nothing
+    ) where {F}
     return _with_scope(f, n, exclude, only, :limit)
 end
 
@@ -248,8 +248,8 @@ end
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_default(
-    f::F, n::Integer; exclude = (), only = nothing
-) where {F}
+        f::F, n::Integer; exclude = (), only = nothing
+    ) where {F}
     return _with_scope(f, n, exclude, only, :default)
 end
 
@@ -292,8 +292,8 @@ end
 See [`with_thread_limit`](@ref) for `exclude`, `only` and what is process-global.
 """
 function with_thread_grant(
-    f::F, n::Integer; exclude = (), only = nothing
-) where {F}
+        f::F, n::Integer; exclude = (), only = nothing
+    ) where {F}
     return _with_scope(f, n, exclude, only, :grant)
 end
 
@@ -361,6 +361,6 @@ saturates the machine) while a loop of 2 items gets budget 4 (2 workers × 4 inn
 Iterators of unknown length fall back to the conservative budget of 1.
 """
 budget_for(range) = _budget_for(Base.IteratorSize(range), range)
-_budget_for(::Union{Base.HasLength,Base.HasShape}, range) =
+_budget_for(::Union{Base.HasLength, Base.HasShape}, range) =
     max(1, capacity() ÷ max(1, length(range)))
 _budget_for(::Base.IteratorSize, _) = 1

@@ -79,7 +79,7 @@ struct ActiveRestriction
     id::Int
     budget::Int
     exclude::Tuple
-    only::Union{Nothing,Tuple}
+    only::Union{Nothing, Tuple}
     kind::Symbol
 end
 
@@ -338,9 +338,9 @@ library, at the count a grant raised, when this grant closes.
     OpenBLAS it is not, which is why its hook is skipped under a partial limit.
 """
 function register_pool!(
-    name::Symbol; get = nothing, set = nothing, guard = nothing, quiesce = nothing,
-    park = nothing,
-)
+        name::Symbol; get = nothing, set = nothing, guard = nothing, quiesce = nothing,
+        park = nothing,
+    )
     _check_controls(name, get, set, guard, quiesce, park)
     scope_open = @lock REGISTRY_LOCK begin
         name in POOL_NAMES[] && throw(
@@ -453,7 +453,7 @@ const PoolInfo = NamedTuple{
         :name, :has_count, :has_guard, :has_quiesce, :has_park, :current, :unrestricted,
         :effective,
     ),
-    Tuple{Symbol,Bool,Bool,Bool,Bool,Union{Int,Nothing},Union{Int,Nothing},Union{Int,Nothing}},
+    Tuple{Symbol, Bool, Bool, Bool, Bool, Union{Int, Nothing}, Union{Int, Nothing}, Union{Int, Nothing}},
 }
 
 """
@@ -659,7 +659,7 @@ function _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
         id = (_NEXT_ACTIVE_ID[] += 1)
         push!(ACTIVE, ActiveRestriction(id, budget, exclude, only, kind))
         _apply!()
-        guards = Tuple{GuardedPool,Int}[]
+        guards = Tuple{GuardedPool, Int}[]
         for pool in GUARDED_POOLS
             target = _effective_budget(pool.name, capacity())
             target < capacity() && push!(guards, (pool, target))
@@ -818,7 +818,7 @@ end
 # is not safe, and inside a loop with spare threads per worker such a call may be in flight.
 # The names of the pools skipped for that reason are pushed to `skipped`.
 function _lowered_park_hooks(before::Vector{Int}, skipped::Vector{Symbol})
-    hooks = Tuple{Symbol,Any}[]
+    hooks = Tuple{Symbol, Any}[]
     for (i, pool) in enumerate(COUNTED_POOLS)
         pool.park === nothing && continue
         now = _effective_budget(pool.name, SAVED[i])
@@ -843,7 +843,7 @@ end
     return nothing
 end
 
-@noinline function _run_park_hooks(hooks::Vector{Tuple{Symbol,Any}})
+@noinline function _run_park_hooks(hooks::Vector{Tuple{Symbol, Any}})
     for (name, park) in hooks
         _park(name, park)
     end

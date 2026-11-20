@@ -300,7 +300,7 @@ end
     const NT = NestedThreading
     Probe.reset!()
 
-    NT.with_thread_limit(1; exclude=(:probe_guard,)) do
+    NT.with_thread_limit(1; exclude = (:probe_guard,)) do
         @test Probe.DEPTH[] == 0
         @test !Probe.guarded()
         @test Probe.VALUE[] == 1              # counted pools are still applied
@@ -309,7 +309,7 @@ end
     # A name that matches no registered guard is simply ignored, not an error — a caller
     # may exclude a pool whose package is not loaded in this session.
     Probe.reset!()
-    NT.with_thread_limit(1; exclude=(:not_a_pool,)) do
+    NT.with_thread_limit(1; exclude = (:not_a_pool,)) do
         NT.capacity() > 1 && @test Probe.guarded()
         @test Probe.VALUE[] == 1
     end
@@ -323,7 +323,7 @@ end
     # An excluded thread count keeps its pre-scope value, not merely unrestricted by this
     # scope but untouched, while the scope's guards still apply.
     Probe.VALUE[] = 7
-    NT.with_thread_limit(1; exclude=(:probe,)) do
+    NT.with_thread_limit(1; exclude = (:probe,)) do
         @test Probe.VALUE[] == 7
         NT.capacity() > 1 && @test Probe.guarded()   # the guard is unaffected
     end
@@ -341,7 +341,7 @@ end
     # `only = (:blas,)` must restrict BLAS and leave the probe pools — counted and guarded
     # alike — exactly as they were, even past this scope's own budget.
     Probe.VALUE[] = 7
-    NT.with_thread_limit(1; only=(:blas,)) do
+    NT.with_thread_limit(1; only = (:blas,)) do
         @test BLAS.get_num_threads() == 1
         @test Probe.VALUE[] == 7
         NT.capacity() > 1 && @test !Probe.guarded()
@@ -352,7 +352,7 @@ end
     # `only = (:probe,)` is the mirror image: the probe counted pool is restricted, BLAS and
     # the probe guard are not.
     Probe.reset!()
-    NT.with_thread_limit(1; only=(:probe,)) do
+    NT.with_thread_limit(1; only = (:probe,)) do
         @test Probe.VALUE[] == 1
         @test BLAS.get_num_threads() == original_blas
         @test !Probe.guarded()
@@ -363,7 +363,7 @@ end
     # scope's `only` does not name the pool.
     Probe.reset!()
     NT.with_thread_limit(1) do
-        NT.with_thread_limit(NT.capacity(); only=(:blas,)) do
+        NT.with_thread_limit(NT.capacity(); only = (:blas,)) do
             @test Probe.VALUE[] == 1   # untouched by the inner scope, still bound by the outer
         end
     end
@@ -1001,9 +1001,11 @@ end
 
             # A guard that throws before the body: the body runs once, without it.
             guard_mode[] = :before
-            @test (@test_logs (:warn, r"The `guard` hook of pool :failing_guard threw") with_thread_limit(
-                body, 1
-            )) === :body
+            @test (
+                @test_logs (:warn, r"The `guard` hook of pool :failing_guard threw") with_thread_limit(
+                    body, 1
+                )
+            ) === :body
             @test runs[] == 1
             @test Probe.guarded()                   # the other guard still ran
             @test isempty(NT.ACTIVE)
@@ -1011,9 +1013,11 @@ end
             # The pool has warned once; later failures are logged at debug level.
             for mode in (:after, :skip)
                 guard_mode[] = mode
-                @test (@test_logs (:debug, r"hook of pool :failing_guard threw again") min_level = D match_mode = :any with_thread_limit(
-                    body, 1
-                )) === :body
+                @test (
+                    @test_logs (:debug, r"hook of pool :failing_guard threw again") min_level = D match_mode = :any with_thread_limit(
+                        body, 1
+                    )
+                ) === :body
             end
             @test runs[] == 3                       # once per call, never twice
 
@@ -1048,9 +1052,11 @@ end
     @test_logs (:debug, r"thread_limit: no pool named :no_such_pool") min_level = D NT.thread_limit(
         :no_such_pool
     )
-    @test (@test_logs (:debug, r"thread_pool_info: no pool named :no_such_pool") min_level = D thread_pool_info(
-        :no_such_pool
-    )) === nothing
+    @test (
+        @test_logs (:debug, r"thread_pool_info: no pool named :no_such_pool") min_level = D thread_pool_info(
+            :no_such_pool
+        )
+    ) === nothing
     # Registered names, and a count of at least 1, are not reported.
     @test_logs min_level = D with_thread_limit(noop, 2; exclude = (:probe,))
     @test_logs min_level = D NT.thread_limit(:probe)

@@ -328,8 +328,14 @@ end
     @test out == 4 .* (1:8)
 
     for ex in (
-            :(@budgeted_batch for i in 1:8; end),
-            :(@budgeted Polyester.@batch for i in 1:8; end),
+            :(
+                @budgeted_batch for i in 1:8
+                end
+            ),
+            :(
+                @budgeted Polyester.@batch for i in 1:8
+                end
+            ),
         )
         expansion = string(macroexpand(@__MODULE__, ex))
         @test occursin("_quiesce_foreign_pools((:polyester,))", expansion)
