@@ -285,7 +285,7 @@ end
     @test Probe.VALUE[] == 16                 # ...while counted pools were still budgeted
 end
 
-@testitem "the Julia-scheduler macros quiesce foreign pools, the Polyester ones do not" tags = [:macros] setup = [Probe] begin
+@testitem "the loop macros quiesce foreign pools, and never Polyester around @batch" tags = [:macros] setup = [Probe] begin
     using NestedThreading
     import Polyester
     Probe.reset!()
@@ -304,22 +304,34 @@ end
     end
     @test Probe.quiesce_count() == 2
 
-    # `@budgeted_batch`, and `@budgeted` over a `@batch`, are Polyester's own regions: asking
-    # Polyester to park the workers it is about to use again would be pure overhead, so the
-    # same `exclude = (:polyester,)` that keeps the guard off also keeps the quiesce off.
+    # `@budgeted_batch`, and `@budgeted` over a `@batch`, run on Julia's threads too, so other
+    # pools are quiesced around them. Polyester is not: they are its own regions, and asking
+    # it to park the workers it is about to use again would be pure overhead. The same
+    # `exclude = (:polyester,)` that keeps its guard off keeps its quiesce off.
     @budgeted_batch for i in 1:8
         out[i] = 3i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 3
 
     @budgeted @inbounds Polyester.@batch for i in 1:8
         out[i] = 4i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 4
+    @test out == 4 .* (1:8)
+
+    for ex in (
+            :(@budgeted_batch for i in 1:8; end),
+            :(@budgeted Polyester.@batch for i in 1:8; end),
+        )
+        expansion = string(macroexpand(@__MODULE__, ex))
+        @test occursin("_quiesce_foreign_pools((:polyester,))", expansion)
+    end
+    NestedThreading._quiesce_foreign_pools((:probe_quiesce,))
+    @test Probe.quiesce_count() == 4
 
     # The sequential branch opens no parallel region at all.
     @budgeted_threads threads = false for i in 1:8
         out[i] = 5i
     end
-    @test Probe.quiesce_count() == 2
+    @test Probe.quiesce_count() == 4
 end

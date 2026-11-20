@@ -84,9 +84,10 @@ tasks that spin for about 2^20 `pause()` iterations before parking, and a `Threa
 region opened during that window waits for them instead of running on them. On 8 threads with
 an empty loop body that is 5.7 µs against 219.9 µs.
 
-A `quiesce` hook makes the library release them, and this package calls it before every
-region it opens on Julia's own scheduler (and from
-[`NestedThreading.quiesce_foreign_pools`](@ref)). A library with both a guard and such
+A `quiesce` hook makes the library release them, and this package's loop macros call it
+before every parallel region they open, except a library's own: around a `Polyester.@batch`
+loop every hook but Polyester's is called. [`NestedThreading.quiesce_foreign_pools`](@ref)
+calls them all. A library with both a guard and such
 workers passes both in the same call, as the PolyesterWeave extension does:
 
 ```julia

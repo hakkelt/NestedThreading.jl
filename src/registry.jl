@@ -275,8 +275,8 @@ A 38x penalty, removed for a tenth of a microsecond, and re-waking the workers f
 
 Unlike a guard, `quiesce` is not scoped and takes no thread count: it is a one-shot "release
 the threads now" with no paired restore, because the library re-acquires what it needs at
-its next region on its own. The loop macros call every registered `quiesce` themselves,
-except around a `Polyester.@batch` loop.
+its next region on its own. The loop macros call every registered `quiesce` themselves, except
+Polyester's own around a `Polyester.@batch` loop, whose workers run on Julia's threads too.
 
 ## Parking
 
@@ -376,18 +376,20 @@ end
 Call every registered `quiesce` hook (see [`register_pool!`](@ref)), so that a region
 about to be opened on Julia's own scheduler can actually use Julia's worker threads.
 
-[`@budgeted_threads`](@ref) and [`@budgeted`](@ref) call this for themselves, except when the
-loop they are wrapping is a `Polyester.@batch` — there the Polyester pool *is* the loop. Call
-it directly before a hand-written `Threads.@threads` or `@spawn` region that does not go
+The loop macros call this for themselves. Around a `Polyester.@batch` loop they skip only
+Polyester's own hook, since there the Polyester pool *is* the loop. Call it directly before a hand-written `Threads.@threads` or `@spawn` region that does not go
 through those macros.
 
 It is a plain call with no paired restore, costs about 0.1 µs with Polyester loaded, and is a
 no-op when nothing is registered. It is safe to call when no foreign region has run: parked
 workers stay parked.
 """
-@noinline function quiesce_foreign_pools()
+quiesce_foreign_pools() = _quiesce_foreign_pools(())
+
+# Every quiesce hook except those of the pools named in `exclude`.
+@noinline function _quiesce_foreign_pools(exclude::Tuple)
     for pool in QUIESCE_POOLS[]
-        pool.quiesce()
+        _name_in(pool.name, exclude) || pool.quiesce()
     end
     return nothing
 end

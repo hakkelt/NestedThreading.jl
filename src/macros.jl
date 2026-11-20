@@ -89,12 +89,12 @@ function _reject_parallel_chain(chain, macroname, emitted)
     return nothing
 end
 
-# A loop that is itself a `Polyester.@batch` is the Polyester pool's own region, so quiescing
-# it would only make it re-acquire its workers a line later. Every other loop here runs on
-# Julia's scheduler and must not open while a foreign pool is still spinning on its threads —
-# see `register_pool!`.
+# Every loop here runs on Julia's threads (a `Polyester.@batch` loop's workers too) and must not
+# open while a foreign pool is still spinning on them; see `register_pool!`. The pools in
+# `exclude` are not quiesced: around a `@batch` loop that is Polyester, whose region the loop
+# is, so quiescing it would only make it re-acquire its workers a line later.
 _quiesce_expr(exclude::Tuple) =
-    :polyester in exclude ? nothing : :($(GlobalRef(NestedThreading, :quiesce_foreign_pools))())
+    :($(GlobalRef(NestedThreading, :_quiesce_foreign_pools))($exclude))
 
 function _budgeted_expr(loop::Expr, chain, exclude::Tuple, mkparallel = identity)
     var, range, body = _split_for(loop)
