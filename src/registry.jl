@@ -86,6 +86,82 @@ const _NEXT_ACTIVE_ID = Ref(0)   # protected by REGISTRY_LOCK, like ACTIVE itsel
 
 const REGISTRY_LOCK = ReentrantLock()
 
+# --- failing hooks ---------------------------------------------------------------------
+#
+# A hook that throws must not leave the registry half-updated, so every `get`/`set`/`park`
+# call made with REGISTRY_LOCK held goes through one of the helpers below: the failure is
+# recorded and the caller moves on to the next pool. The recorded failures are logged by
+# `_report_hook_failures` once the lock is released, so a logger never runs while it is held.
+
+struct HookFailure
+    pool::Symbol
+    hook::Symbol        # :get, :set or :park
+    exception::Any
+    backtrace::Any
+    first::Bool         # the first failure of this pool: logged with `@warn`, later ones with `@debug`
+end
+
+# Both protected by REGISTRY_LOCK.
+const PENDING_FAILURES = HookFailure[]
+const WARNED_POOLS = Set{Symbol}()
+
+function _record_failure!(pool::Symbol, hook::Symbol, exception, backtrace)
+    first = !(pool in WARNED_POOLS)
+    first && push!(WARNED_POOLS, pool)
+    push!(PENDING_FAILURES, HookFailure(pool, hook, exception, backtrace, first))
+    return nothing
+end
+
+# `pool.get()` as an `Int`, or `nothing` when it throws or returns something that is not an
+# integer.
+@noinline function _get_count(pool)
+    try
+        return Int(pool.get())::Int
+    catch exception
+        _record_failure!(pool.name, :get, exception, catch_backtrace())
+        return nothing
+    end
+end
+
+@noinline function _set_count(pool, n::Int)
+    try
+        pool.set(n)
+    catch exception
+        _record_failure!(pool.name, :set, exception, catch_backtrace())
+    end
+    return nothing
+end
+
+@noinline function _park(name::Symbol, park)
+    try
+        park()
+    catch exception
+        _record_failure!(name, :park, exception, catch_backtrace())
+    end
+    return nothing
+end
+
+# The failures recorded since the last call, or `nothing` (allocating nothing) when there are
+# none. Called with the lock held, right before it is released.
+function _take_hook_failures!()
+    isempty(PENDING_FAILURES) && return nothing
+    failures = copy(PENDING_FAILURES)
+    empty!(PENDING_FAILURES)
+    return failures
+end
+
+_report_hook_failures(::Nothing) = nothing
+@noinline function _report_hook_failures(failures::Vector{HookFailure})
+    for f in failures
+        if f.first
+            @warn "The `$(f.hook)` hook of pool $(repr(f.pool)) threw; NestedThreading skipped it and carried on with the other pools. Later failures of this pool are logged at debug level." exception = (f.exception, f.backtrace)
+        else
+            @debug "The `$(f.hook)` hook of pool $(repr(f.pool)) threw again; skipped." exception = (f.exception, f.backtrace)
+        end
+    end
+    return nothing
+end
+
 """
     capacity() -> Int
 
@@ -128,6 +204,12 @@ The keywords are the controls a library can have; pass the ones it has:
 * `park`: called as `park()` after a [`with_thread_grant`](@ref) scope closes and lowers
   this library's count, to make the workers it no longer uses release the cores they are
   spinning on. Needs `get`/`set`. See "Parking" below.
+
+A hook that throws once registered is not fatal. When a `get`, `set` or `park` call throws,
+it is skipped: every other pool is still set, restored and parked, the scope's bookkeeping
+stays consistent, and the scope returns its body's value or rethrows its body's exception as
+if nothing had happened. A count whose `get` throws keeps the value it was last restored to.
+The first failure of each pool is logged with `@warn`, later ones at debug level.
 
 Registration is checked strictly. It throws an `ArgumentError` for a `name` that is already
 registered, for `get` without `set` or `set` without `get`, for `park` without `get`/`set`,
@@ -332,7 +414,9 @@ only the library registered as `name`. Each has these fields:
   the first open scope entered, or `current` when none is open.
 * `effective`: the count the open scopes apply to it, or `current` when none is open.
 
-The three counts are `Int`s, or `nothing` for a library without `get`/`set`. The result is a
+The three counts are `Int`s, or `nothing` for a library without `get`/`set`. `current` is
+also `nothing` when `get()` throws (see [`register_pool!`](@ref)), and so are `unrestricted`
+and `effective` if no scope is open then. The result is a
 snapshot taken under the registry lock; it does not change as scopes open and close.
 
 `thread_pool_info(name)` returns `nothing` for a name no library has registered (logged at
@@ -347,10 +431,19 @@ info = thread_pool_info(:blas)
 info === nothing || info.effective
 ```
 """
-thread_pool_info() = @lock REGISTRY_LOCK PoolInfo[_pool_info(name) for name in POOL_NAMES[]]
+function thread_pool_info()
+    info, failures = @lock REGISTRY_LOCK begin
+        (PoolInfo[_pool_info(name) for name in POOL_NAMES[]], _take_hook_failures!())
+    end
+    _report_hook_failures(failures)
+    return info
+end
 
 function thread_pool_info(name::Symbol)
-    info = @lock REGISTRY_LOCK name in POOL_NAMES[] ? _pool_info(name) : nothing
+    info, failures = @lock REGISTRY_LOCK begin
+        (name in POOL_NAMES[] ? _pool_info(name) : nothing, _take_hook_failures!())
+    end
+    _report_hook_failures(failures)
     info === nothing &&
         @debug "thread_pool_info: no pool named $(repr(name)) is registered."
     return info
@@ -363,7 +456,7 @@ function _pool_info(name::Symbol)
     has_park = false
     if i !== nothing
         pool = COUNTED_POOLS[i]
-        current = Int(pool.get())::Int
+        current = _get_count(pool)
         has_park = pool.park !== nothing
         if isempty(ACTIVE)
             unrestricted = effective = current
@@ -463,22 +556,25 @@ end
 
 @noinline function _apply!()
     for (i, pool) in enumerate(COUNTED_POOLS)
-        pool.set(_effective_budget(pool.name, SAVED[i]))
+        _set_count(pool, _effective_budget(pool.name, SAVED[i]))
     end
     return nothing
 end
 
+# A pool whose `get()` fails keeps its previous snapshot: the count the last scope to close
+# restored it to, or its count at registration.
 @noinline function _snapshot!()
     resize!(SAVED, length(COUNTED_POOLS))
     for (i, pool) in enumerate(COUNTED_POOLS)
-        SAVED[i] = Int(pool.get())::Int
+        count = _get_count(pool)
+        count === nothing || (SAVED[i] = count)
     end
     return nothing
 end
 
 @noinline function _restore!()
     for (i, pool) in enumerate(COUNTED_POOLS)
-        pool.set(SAVED[i])
+        _set_count(pool, SAVED[i])
     end
     return nothing
 end
@@ -501,7 +597,7 @@ restored exactly once, so no task can ever restore a value that was itself alrea
 restricted by another task.
 """
 function _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
-    return @lock REGISTRY_LOCK begin
+    id, guards, failures = @lock REGISTRY_LOCK begin
         isempty(ACTIVE) && _snapshot!()
         id = (_NEXT_ACTIVE_ID[] += 1)
         push!(ACTIVE, ActiveRestriction(id, budget, exclude, only, kind))
@@ -511,8 +607,10 @@ function _enter!(budget::Int, exclude::Tuple, only, kind::Symbol = :limit)
             target = _effective_budget(pool.name, capacity())
             target < capacity() && push!(guards, (pool, target))
         end
-        (id, guards)
+        (id, guards, _take_hook_failures!())
     end
+    _report_hook_failures(failures)
+    return id, guards
 end
 
 """
@@ -527,7 +625,7 @@ is called afterwards, still under the lock, so that no other grant can open and 
 workers while they are being released.
 """
 function _exit!(id::Int)
-    not_parked = @lock REGISTRY_LOCK begin
+    not_parked, failures = @lock REGISTRY_LOCK begin
         i = findfirst(e -> e.id == id, ACTIVE)
         was_grant = i !== nothing && ACTIVE[i].kind === :grant
         before = was_grant ? _current_budgets() : Int[]
@@ -539,9 +637,10 @@ function _exit!(id::Int)
         end
         skipped = Symbol[]
         was_grant && _run_park_hooks(_lowered_park_hooks(before, skipped))
-        skipped
+        (skipped, _take_hook_failures!())
     end
     # Logged after the lock is released, so that a logger never runs while it is held.
+    _report_hook_failures(failures)
     for name in not_parked
         @debug "Pool $(repr(name)) not parked after its grant closed: a hard limit between 1 and capacity() is open around it, so another task may be inside a threaded call to it."
     end
@@ -650,7 +749,7 @@ end
 # is not safe, and inside a loop with spare threads per worker such a call may be in flight.
 # The names of the pools skipped for that reason are pushed to `skipped`.
 function _lowered_park_hooks(before::Vector{Int}, skipped::Vector{Symbol})
-    hooks = Any[]
+    hooks = Tuple{Symbol,Any}[]
     for (i, pool) in enumerate(COUNTED_POOLS)
         pool.park === nothing && continue
         now = _effective_budget(pool.name, SAVED[i])
@@ -658,7 +757,7 @@ function _lowered_park_hooks(before::Vector{Int}, skipped::Vector{Symbol})
         if _partial_limit_open(pool.name)
             push!(skipped, pool.name)
         else
-            push!(hooks, pool.park)
+            push!(hooks, (pool.name, pool.park))
         end
     end
     return hooks
@@ -675,9 +774,9 @@ end
     return nothing
 end
 
-@noinline function _run_park_hooks(hooks::Vector{Any})
-    for park in hooks
-        park()
+@noinline function _run_park_hooks(hooks::Vector{Tuple{Symbol,Any}})
+    for (name, park) in hooks
+        _park(name, park)
     end
     return nothing
 end

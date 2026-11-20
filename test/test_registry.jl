@@ -835,6 +835,98 @@ end
     @test Probe.VALUE[] == 16
 end
 
+@testitem "a throwing hook is skipped, reported once, and corrupts nothing" tags = [:registry] setup = [Probe] begin
+    using NestedThreading, Logging, LinearAlgebra
+    const NT = NestedThreading
+    Probe.reset!()
+    const W = Logging.Warn
+
+    # `const`, not plain globals: the pools stay registered for the rest of the process, so
+    # their hooks must go on seeing live values (see "registering mid-scope joins the active
+    # restriction"). Each failure kind gets a pool of its own, because only the first failure
+    # of a pool is reported as a warning.
+    const fail_park = Ref(false)
+    const fail_set = Ref(false)
+    const fail_get = Ref(false)
+    const park_value = Ref(8)
+    const set_value = Ref(8)
+    const get_value = Ref(8)
+    const parked_after = Ref(0)
+    NT.register_pool!(
+        :failing_park; get = () -> park_value[], set = n -> (park_value[] = n),
+        park = () -> (fail_park[] && error("park failed"); nothing),
+    )
+    NT.register_pool!(
+        :failing_set; get = () -> set_value[],
+        set = n -> (fail_set[] && error("set failed"); set_value[] = n),
+    )
+    NT.register_pool!(
+        :failing_get; get = () -> (fail_get[] && error("get failed"); get_value[]),
+        set = n -> (get_value[] = n), park = () -> (parked_after[] += 1; nothing),
+    )
+    blas = BLAS.get_num_threads()
+
+    try
+        # A `set` that throws on entry and on exit: every other pool is still set and
+        # restored, no entry is left behind, and the body's value comes back.
+        fail_set[] = true
+        result = @test_logs (:warn, r"The `set` hook of pool :failing_set threw") match_mode = :any with_thread_limit(2) do
+            @test Probe.VALUE[] == 2
+            @test get_value[] == 2              # registered after the failing pool
+            :body
+        end
+        @test result === :body
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        @test get_value[] == 8
+        @test set_value[] == 8
+        @test BLAS.get_num_threads() == blas
+
+        # Reported once per pool: the next failure is logged at debug level only.
+        @test_logs min_level = W with_thread_limit(() -> nothing, 2)
+        @test_logs (:debug, r"hook of pool :failing_set threw again") min_level = Logging.Debug match_mode = :any with_thread_limit(
+            () -> nothing, 2
+        )
+        # An exception from the body passes through unchanged.
+        @test_throws "body failed" with_thread_limit(() -> error("body failed"), 2)
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        fail_set[] = false
+
+        # A `get` that throws while snapshotting: the pool keeps its previous snapshot and is
+        # restored to it.
+        fail_get[] = true
+        @test_logs (:warn, r"The `get` hook of pool :failing_get threw") match_mode = :any with_thread_limit(2) do
+            @test get_value[] == 2
+        end
+        @test get_value[] == 8
+        @test isempty(NT.ACTIVE)
+        @test Probe.VALUE[] == 16
+        # `thread_pool_info` reports the count as unknown and describes every other pool.
+        info = thread_pool_info(:failing_get)
+        @test info.current === info.unrestricted === info.effective === nothing
+        @test thread_pool_info(:probe).current == 16
+        @test length(thread_pool_info()) == length(NT.POOL_NAMES[])
+        fail_get[] = false
+        @test thread_pool_info(:failing_get).current == 8
+
+        # A `park` hook that throws: the park hooks after it still run.
+        if NT.capacity() > 1
+            fail_park[] = true
+            with_thread_default(1; only = (:failing_park, :failing_get)) do
+                @test_logs (:warn, r"The `park` hook of pool :failing_park threw") match_mode = :any with_thread_grant(
+                    () -> nothing, NT.capacity(); only = (:failing_park, :failing_get)
+                )
+            end
+            @test parked_after[] == 1
+            @test isempty(NT.ACTIVE)
+            @test park_value[] == 8
+        end
+    finally
+        fail_park[] = fail_set[] = fail_get[] = false
+    end
+end
+
 @testitem "quiet skips are logged at debug level" tags = [:registry] setup = [Probe] begin
     using NestedThreading, Logging
     const NT = NestedThreading

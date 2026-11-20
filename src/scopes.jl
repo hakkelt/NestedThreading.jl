@@ -248,12 +248,14 @@ Scopes still win while they are open; this only changes what the process returns
 nothing is open. It is not scoped and has no inverse.
 """
 function reset_thread_counts!()
-    @lock REGISTRY_LOCK begin
+    failures = @lock REGISTRY_LOCK begin
         for i in eachindex(COUNTED_POOLS)
             SAVED[i] = MAXIMA[i]
         end
         isempty(ACTIVE) && _restore!()
+        _take_hook_failures!()
     end
+    _report_hook_failures(failures)
     return nothing
 end
 
